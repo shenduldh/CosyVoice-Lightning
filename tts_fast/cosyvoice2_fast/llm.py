@@ -108,20 +108,19 @@ class CosyVoice2LLMWrapper:
         ):
             yield output.outputs[0].token_ids
 
-    async def background_generate(self, *args, q: asyncio.Queue, **kwargs):
+    async def background_generate(self, *args, q: asyncio.Queue, main_loop, **kwargs):
         try:
             async for tokens in self.engine_generate_fn(*args, **kwargs):
-                q.put_nowait(tokens)
+                main_loop.call_soon_threadsafe(q.put_nowait, tokens)
         finally:
-            q.put_nowait(None)
+            main_loop.call_soon_threadsafe(q.put_nowait, None)
 
     async def call_engine_generation(self, *args, **kwargs):
         q = asyncio.Queue()
-        asyncio.run_coroutine_threadsafe(
-            self.background_generate(*args, **kwargs, q=q), self.loop
-        )
+        main_loop = asyncio.get_running_loop()
+        asyncio.run_coroutine_threadsafe(self.background_generate(*args, **kwargs, q=q, main_loop=main_loop), self.loop)
         while True:
-            tokens = q.get_nowait() if not q.empty() else await q.get()
+            tokens = await q.get()
             if tokens is None:
                 break
             yield tokens
