@@ -62,7 +62,7 @@ class CosyVoice2LLMWrapper:
         self.mix_ratio = mix_ratio
         self.num_speech_tokens = 6561 + 3
         self.num_text_tokens = 151936  # Qwen2's vocab_size
-        self.sos_eos_token_id = self.num_speech_tokens + self.num_text_tokens + 1
+        self.sos_eos_token_id = self.num_speech_tokens + self.num_text_tokens
         self.task_token_id = self.sos_eos_token_id + 1
         self.zero_token_id = self.task_token_id + 1
         self.stop_token_ids = [6561, 6562, 6563]
@@ -135,17 +135,17 @@ class CosyVoice2LLMWrapper:
         max_tokens_ratio=20,
         min_tokens_ratio=2,
     ) -> AsyncGenerator[int, None]:
-        """Only support streaming output"""
+        """Only support streaming output."""
         # offset text tokens by `num_speech_tokens` to distinguish speech tokens
         text_tokens = tensor_to_list(text + self.num_speech_tokens)
         prompt_text_tokens = tensor_to_list(prompt_text_tokens + self.num_speech_tokens)
         prompt_speech_tokens = tensor_to_list(prompt_speech_tokens)
 
         input_token_ids = (
-            [self.sos_eos_token_id - 1]
+            [self.sos_eos_token_id]
             + prompt_text_tokens
             + text_tokens
-            + [self.task_token_id - 1]
+            + [self.task_token_id]
             + prompt_speech_tokens
         )
 
@@ -174,7 +174,7 @@ class CosyVoice2LLMWrapper:
         prompt_speech_tokens: torch.Tensor,
         request_id=None,
     ) -> AsyncGenerator[int, None]:
-        """Support streaming input and streaming output"""
+        """Support streaming input and streaming output."""
         text_tokens_not_input = tensor_to_list(
             prompt_text_tokens + self.num_speech_tokens
         )

@@ -2,6 +2,7 @@ import sys
 import asyncio
 import uvloop
 from utils import path_to_root
+from logger import logger
 
 sys.path.insert(0, path_to_root())
 asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
@@ -15,16 +16,18 @@ import requests
 import numpy as np
 from ruamel import yaml
 from typing import Union
-from logger import logger
 from datetime import datetime
 from tempfile import NamedTemporaryFile
 from dataclasses import dataclass, field
 from contextlib import asynccontextmanager
-from starlette.responses import JSONResponse
+from starlette.responses import JSONResponse, StreamingResponse
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from io import BytesIO
+import soundfile
 
 from bases import *
 from utils import *
+from debug import Debug, debug as debug_instance
 from tts_fast.pipeline import CosyVoice2Pipeline, CosyVoiceInputType
 from seg2stream import (
     SegmentationManager,
@@ -38,6 +41,7 @@ class Global:
     config: Union[None | dict] = None
     seg_manager: Union[None | SegmentationManager] = None
     queues: dict[str, asyncio.Queue] = {}
+    debug: Debug = debug_instance
 
 
 @asynccontextmanager
@@ -52,35 +56,32 @@ async def lifespan(app: FastAPI):
     match Global.config["segmentation"]["mode"]:
         case "bistream":
             bi_cfg = Global.config["segmentation"]["bistream"]
-            Global.seg_manager = SegmentationManager(
-                SegSent2GeneratorConfig(
-                    segmentation_suffix=Global.config["segmentation"]["seg_suffix"],
-                    max_waiting_time=bi_cfg["max_waiting_time"],
-                    max_stream_time=bi_cfg["max_stream_time"],
-                    first_min_seg_size=bi_cfg["first_min_seg_size"],
-                    min_seg_size=bi_cfg["min_seg_size"],
-                )
+            seg_config = SegSent2GeneratorConfig(
+                segmentation_suffix=Global.config["segmentation"]["seg_suffix"],
+                max_waiting_time=bi_cfg["max_waiting_time"],
+                max_stream_time=bi_cfg["max_stream_time"],
+                first_min_seg_size=bi_cfg["first_min_seg_size"],
+                min_seg_size=bi_cfg["min_seg_size"],
             )
         case "unistream":
             uni_cfg = Global.config["segmentation"]["unistream"]
-            Global.seg_manager = SegmentationManager(
-                SegSent2StreamConfig(
-                    segmentation_suffix=Global.config["segmentation"]["seg_suffix"],
-                    first_max_accu_time=uni_cfg["first_max_accu_time"],
-                    max_accu_time=uni_cfg["max_accu_time"],
-                    first_max_buffer_size=uni_cfg["first_max_buffer_size"],
-                    max_buffer_size=uni_cfg["max_buffer_size"],
-                    max_waiting_time=uni_cfg["max_waiting_time"],
-                    max_stream_time=uni_cfg["max_stream_time"],
-                    first_min_seg_size=uni_cfg["first_min_seg_size"],
-                    min_seg_size=uni_cfg["min_seg_size"],
-                    max_seg_size=uni_cfg["max_seg_size"],
-                    loose_steps=uni_cfg["loose_steps"],
-                    loose_size=uni_cfg["loose_size"],
-                    fade_in_out_time=uni_cfg["fade_in_out_time"],
-                    seconds_per_word=uni_cfg["seconds_per_word"],
-                )
+            seg_config = SegSent2StreamConfig(
+                segmentation_suffix=Global.config["segmentation"]["seg_suffix"],
+                first_max_accu_time=uni_cfg["first_max_accu_time"],
+                max_accu_time=uni_cfg["max_accu_time"],
+                first_max_buffer_size=uni_cfg["first_max_buffer_size"],
+                max_buffer_size=uni_cfg["max_buffer_size"],
+                max_waiting_time=uni_cfg["max_waiting_time"],
+                max_stream_time=uni_cfg["max_stream_time"],
+                first_min_seg_size=uni_cfg["first_min_seg_size"],
+                min_seg_size=uni_cfg["min_seg_size"],
+                max_seg_size=uni_cfg["max_seg_size"],
+                loose_steps=uni_cfg["loose_steps"],
+                loose_size=uni_cfg["loose_size"],
+                fade_in_out_time=uni_cfg["fade_in_out_time"],
+                seconds_per_word=uni_cfg["seconds_per_word"],
             )
+    Global.seg_manager = SegmentationManager(seg_config)
     Global.seg_manager.start()
 
     async def process_seg_output():
@@ -90,6 +91,8 @@ async def lifespan(app: FastAPI):
                 logger.info(f"TTS Segment: id={id} text={text}")
                 if text is None:
                     Global.queues.pop(id)
+                else:
+                    Global.debug.add_text(id, [text])
 
     seg_output_task = asyncio.create_task(process_seg_output())
 
@@ -106,10 +109,17 @@ async def lifespan(app: FastAPI):
         speaker_ids = Global.tts_model.load_cache(speaker_cache_path)
         logger.info(f"Successfully load speakers: {speaker_ids}")
 
+    # set debug
+    Global.debug.set_enabled(os.getenv("DEBUG", "0") == "1")
+    logger.info(f"Debug mode: {Global.debug.enabled}")
+    Global.debug.patch(app)
+    Global.debug.on_startup()
+
     yield
 
     Global.seg_manager.close()
     await seg_output_task
+    Global.debug.on_destroy()
 
 
 app = FastAPI(lifespan=lifespan)
@@ -158,7 +168,7 @@ async def load_cache(req: LoadCacheInput) -> dict:
 
 @app.post("/clone")
 async def clone(req: CloneInput) -> CloneOutput:
-    logger.info("Request Params: %s" % truncate_long_str(req))
+    logger.info("Request Params: %s" % truncate_long_str(req.model_dump()))
 
     prompt_id = req.prompt_id
     prompt_text = req.prompt_text
@@ -195,7 +205,7 @@ async def clone(req: CloneInput) -> CloneOutput:
     else:
         prompt_audio = any_format_to_ndarray(prompt_audio, audio_format, sample_rate)
         with NamedTemporaryFile(suffix=".wav") as f:
-            save_audio(prompt_audio, f.name, sample_rate)
+            save_audio(prompt_audio, f.name, 16000)
             f.flush()
             async for _ in Global.tts_model.async_generate(
                 None, test_text, prompt_text, f.name, None, prompt_id, loudness
@@ -210,6 +220,8 @@ async def clone(req: CloneInput) -> CloneOutput:
 
 @app.post("/tts")
 async def tts(req: TTSInput) -> TTSOutput:
+    logger.info("Request Params: %s" % req)
+
     prompt_id = req.prompt_id
     instruct_text = req.instruct_text
 
@@ -221,19 +233,30 @@ async def tts(req: TTSInput) -> TTSOutput:
 
     audio_ndarray = []
     async for chunk in Global.tts_model.async_generate(
-        None, req.text, None, None, instruct_text, prompt_id
+        None, req.text, None, None, instruct_text, prompt_id, split_text=True
     ):
         audio_ndarray.append(chunk)
     audio_ndarray = np.concatenate(audio_ndarray)
 
-    return TTSOutput(
-        audio=format_ndarray_to_base64(
-            audio_ndarray,
-            Global.tts_model.sample_rate,
-            req.sample_rate,
-            req.audio_format,
+    if req.return_base64:
+        return TTSOutput(
+            audio=format_ndarray_to_base64(
+                audio_ndarray,
+                Global.tts_model.sample_rate,
+                req.sample_rate,
+                req.audio_format,
+            )
         )
-    )
+    else:
+        buffer = BytesIO()
+        soundfile.write(
+            buffer, audio_ndarray, format="wav", samplerate=Global.tts_model.sample_rate
+        )
+        return StreamingResponse(
+            buffer,
+            media_type="audio/wav",
+            headers={"Content-Disposition": "attachment; filename=audio.wav"},
+        )
 
 
 @dataclass
@@ -288,12 +311,14 @@ async def tts_job(tts_info: TTSInfo, websocket: WebSocket):
                 ).model_dump()
             )
             tts_info.count += 1
+            Global.debug.add_chunk(tts_info.id, chunk_ndarray)
 
         await websocket.send_json(
             TTSStreamOutput(
                 id=tts_info.id, is_end=True, index=tts_info.count
             ).model_dump()
         )
+        Global.debug.save(tts_info.id, tts_info, Global.tts_model.sample_rate)
     except BaseException as e:
         asyncio.create_task(output_stream.athrow(StopAsyncIteration))
         if not isinstance(e, asyncio.CancelledError):

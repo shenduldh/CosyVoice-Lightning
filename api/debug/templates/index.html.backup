@@ -1,0 +1,383 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+    <meta charset="UTF-8">
+    <title>TTS Debug</title>
+    <link href="{{ url_for('debug_static', path='layui/css/layui.css') }}" rel="stylesheet">
+    <script src="{{ url_for('debug_static', path='layui/layui.js') }}"></script>
+    <script src="{{ url_for('debug_static', path='utils.js') }}"></script>
+    <style>
+        #tree {
+            font-size: 16px;
+            font-weight: bold;
+        }
+    </style>
+</head>
+
+<body>
+    <!-- 功能管理 -->
+    <div class="layui-row"
+        style="position: sticky; top: 0; z-index: 10; background-color:#bcc492; display: flex; justify-content: center; padding-top: 10px">
+        <!-- 克隆 -->
+        <div class="layui-col-md3 layui-form">
+            <div class="layui-form-item">
+                <label class="layui-form-label">音色 ID</label>
+                <div class="layui-input-inline">
+                    <input id="prompt_id" type="text" class="layui-input ">
+                </div>
+            </div>
+            <div class="layui-form-item">
+                <label class="layui-form-label">音量大小</label>
+                <div class="layui-input-inline">
+                    <input id="loudness" class="layui-input" type="number" min="1" max="100" value="30"
+                        lay-affix="number">
+                </div>
+            </div>
+            <div class="layui-form-item">
+                <label class="layui-form-label">参考文本</label>
+                <div class="layui-input-inline">
+                    <textarea id="prompt_text" class="layui-textarea"></textarea>
+                </div>
+            </div>
+            <div class="layui-form-item">
+                <label class="layui-form-label">参考音频</label>
+                <div class="layui-input-block">
+                    <button class="layui-upload-drag" id="prompt_audio">
+                        <i class="layui-icon layui-icon-upload"></i>
+                        <div id="prompt_audio_filename">点击上传，或将文件拖拽到此处</div>
+                        <audio id="prompt_audio_preview"></audio>
+                    </button>
+                </div>
+            </div>
+            <div class="layui-form-item">
+                <div class="layui-input-block">
+                    <button id="clone_btn" class="layui-btn layui-bg-blue">克隆</button>
+                </div>
+            </div>
+        </div>
+        <!-- 删除音色 -->
+        <div class="layui-col-md1 layui-form">
+            <button type="button" class="layui-btn layui-bg-red" lay-on="delete_prompt_ids">删除音色</button>
+        </div>
+        <!-- 语音合成 -->
+        <div class="layui-col-md3 layui-form">
+            <div class="layui-form-item">
+                <label class="layui-form-label">音色 ID</label>
+                <div class="layui-input-inline">
+                    <input id="generation_id" type="text" class="layui-input ">
+                </div>
+            </div>
+            <div class="layui-form-item">
+                <label class="layui-form-label">合成文本</label>
+                <div class="layui-input-inline">
+                    <textarea id="generation_text" class="layui-textarea"></textarea>
+                </div>
+            </div>
+            <div class="layui-form-item">
+                <div class="layui-input-block">
+                    <audio id="generation_preview" controls autoplay></audio>
+                </div>
+            </div>
+            <div class="layui-form-item">
+                <div class="layui-input-block">
+                    <button id="generation_btn" class="layui-btn layui-bg-blue">合成</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- 历史管理 -->
+    <div id="tree" style="margin-bottom: 50px"></div>
+    <audio id="audio_displayer" controls autoplay style="position: fixed; bottom: 0; width: 100%"></audio>
+    <a id="downloader"></a>
+
+
+    <!-- 语音合成 -->
+    <script>
+        const generation_id = document.getElementById("generation_id")
+        const generation_text = document.getElementById("generation_text")
+        const generation_preview = document.getElementById("generation_preview")
+        const generation_btn = document.getElementById("generation_btn")
+
+        generation_btn.onclick = async () => {
+            if (generation_text.value.length == 0) {
+                layer.msg("请输入要合成的文本。")
+                return
+            }
+
+            let audioData = ""
+            const ws = new WebSocket(`${location.protocol.startsWith("https") ? "wss:" : "ws:"}//${location.host}/tts`)
+
+            generation_btn.innerHTML = `<i class="layui-icon layui-icon-loading layui-anim layui-anim-rotate layui-anim-loop"></i>`
+            generation_btn.className = "layui-btn layui-btn-disabled"
+            generation_btn.disabled = true
+
+            ws.onopen = () => {
+                ws.send(JSON.stringify({
+                    req_params: {
+                        prompt_id: generation_id.value,
+                        audio_format: "pcm",
+                        sample_rate: 24000,
+                        instruct_text: null,
+                    }
+                }))
+                ws.send(JSON.stringify({ "text": generation_text.value, "done": true }))
+            }
+
+            ws.onmessage = async e => {
+                const msg = JSON.parse(e.data)
+                console.log(msg)
+                if (msg.data && msg.data.length > 0) audioData += msg.data
+                if (msg.is_end) {
+                    ws.close()
+                    let arrayBuffer = Uint8Array.from(atob(audioData), c => c.charCodeAt(0)).buffer
+                    arrayBuffer = int16ArrayBufferToWav(arrayBuffer, 24000, 16, 1)
+                    generation_preview.src = URL.createObjectURL(new Blob([arrayBuffer], { mineType: "audio/wav" }))
+                    generation_preview.title = `${generation_id.value}.wav`
+                    generation_preview.onloadedmetadata = () => {
+                        layer.msg(`${generation_id.value} 语音合成完成。`)
+                        generation_btn.innerHTML = "合成"
+                        generation_btn.className = "layui-btn layui-bg-blue"
+                        generation_btn.disabled = false
+                    }
+                }
+            }
+        }
+    </script>
+
+    <!-- 删除音色 -->
+    <script>
+        layui.use(() => {
+            let selected = []
+            layui.util.on({
+                delete_prompt_ids: () => {
+                    layer.open({
+                        type: 1,
+                        content: '<div id="show_all_prompt_ids" class="layui-form" style="padding: 10px"></div>',
+                        offset: ["30%", "25%"],
+                        area: ["50%", "auto"],
+                        title: "删除音色",
+                        shadeClose: true,
+                        success: async (layero, index, that) => {
+                            selected = []
+                            const displayer = document.getElementById("show_all_prompt_ids")
+                            const prompt_ids = await (await fetch(`${location.protocol}//${location.host}/speakers`)).json()
+
+                            for (let id of prompt_ids) {
+                                let i = document.createElement("input")
+                                i.type = "checkbox"
+                                i.title = id
+                                i.value = id
+                                i.setAttribute("lay-filter", "prompt_ids")
+                                displayer.append(i)
+                            }
+                            layui.form.render("checkbox")
+                            layui.form.on("checkbox(prompt_ids)", data => {
+                                const elem = data.elem
+                                const checked = elem.checked
+                                const value = elem.value
+                                const idx = selected.indexOf(elem.value)
+                                if (checked && idx == -1) selected.push(value)
+                                if (!checked && idx > -1) selected.splice(idx, 1)
+                            })
+                        },
+                        btn: ["删除", "取消"],
+                        btn1: async (index, layero, that) => {
+                            if (selected.length > 0) {
+                                let res = await fetch(`${location.protocol}//${location.host}/remove`, {
+                                    method: "post", headers: { "Content-Type": "application/json" },
+                                    body: JSON.stringify({ prompt_ids: selected }),
+                                })
+                                res = await res.json(res)
+                                layer.msg(`${res.removed_speakers.join("、")} 已删除。`)
+                                layer.close(index)
+                            } else layer.msg("请选择要删除的音色。")
+                        },
+                        btn2: () => { }
+                    })
+                }
+            })
+        })
+    </script>
+
+    <!-- 克隆 -->
+    <script>
+        const baseURL = `${location.protocol}//${location.host}`
+        const prompt_audio_preview = document.getElementById("prompt_audio_preview")
+        const prompt_audio_filename = document.getElementById("prompt_audio_filename")
+        const clone_btn = document.getElementById("clone_btn")
+        const loudness = document.getElementById("loudness")
+        const prompt_id = document.getElementById("prompt_id")
+        const prompt_text = document.getElementById("prompt_text")
+        let prompt_audio = null
+        let prompt_format = null
+        let prompt_samplerate = null
+
+        layui.upload.render({
+            elem: "#prompt_audio",
+            accept: "audio",
+            acceptMime: "audio/wav, audio/mp3",
+            auto: false,
+            choose: obj => {
+                obj.preview(async (index, file, result) => {
+                    prompt_audio_preview.setAttribute("controls", true)
+                    prompt_audio_filename.innerText = file.name
+                    const audioBuffer = await base64ToAudioBuffer(result)
+                    const arrayBuffer = audioBufferToWav(audioBuffer, 16)
+                    prompt_audio = arrayBufferToBase64(arrayBuffer)
+                    prompt_audio_preview.src = "data:audio/wav;base64," + prompt_audio
+                    prompt_samplerate = audioBuffer.sampleRate
+                    prompt_format = "wav"
+                })
+            }
+        })
+
+        clone_btn.onclick = async () => {
+            if (prompt_text.value.length == 0) {
+                layer.msg("请填写参考文本。")
+                return
+            }
+            if (!prompt_audio) {
+                layer.msg("请上传参考音频。")
+                return
+            }
+            if (prompt_id.value.length == 0) {
+                layer.msg("请配置音色 ID。")
+                return
+            }
+
+            let res = await fetch(`${location.protocol}//${location.host}/clone`, {
+                method: "post",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    "prompt_text": prompt_text.value,
+                    "prompt_audio": prompt_audio,
+                    "prompt_id": prompt_id.value,
+                    "audio_format": prompt_format,
+                    "sample_rate": prompt_samplerate,
+                    "loudness": loudness.value,
+                })
+            })
+            res = await res.json()
+            if (res.existed) layer.msg(`${res.prompt_id} 已存在。`)
+            else layer.msg(`${res.prompt_id} 克隆成功。`)
+        }
+    </script>
+
+    <!-- 合成历史管理 -->
+    <script>
+        const audio_displayer = document.getElementById("audio_displayer")
+        const downloader = document.getElementById("downloader")
+        const layer = layui.layer
+
+        const createOperators = root => {
+            if (!("children" in root)) return
+
+            const ele = document.querySelector(`[data-id="${root.id}"] > div.layui-tree-entry`)
+            const btns = document.createElement("div")
+            btns.className = "layui-btn-group layui-tree-btnGroup"
+            ele.appendChild(btns)
+
+            const del_btn = document.createElement("li")
+            del_btn.className = "layui-icon layui-icon-delete"
+            del_btn.onclick = () => {
+                layer.open(
+                    {
+                        type: 0,
+                        title: `注意`,
+                        content: `是否删除 ${root.title}？`,
+                        icon: 0,
+                        shadeClose: true,
+                        btn: ['确定', '取消'],
+                        btn1: async (index, layero, that) => {
+                            await fetch(root.del_href)
+                            await render_tree()
+                            layer.close(index)
+                        },
+                        btn2: () => { }
+                    }
+                )
+            }
+
+            const dl_btn = document.createElement("li")
+            dl_btn.className = "layui-icon layui-icon-download-circle"
+            dl_btn.onclick = () => {
+                downloader.href = root.href
+                downloader.click()
+            }
+
+            btns.appendChild(del_btn)
+            btns.appendChild(dl_btn)
+
+            for (let child of root.children) createOperators(child)
+        }
+
+        const getData = async () => {
+            const convert = d => {
+                const converted = {
+                    title: d.name,
+                    id: d.id,
+                    href: d.dl_href,
+                }
+                if (d.type === "folder") {
+                    converted.spread = d.level < 3
+                    converted.del_href = d.del_href
+                    converted.children = d.children.map(convert)
+                }
+                if (d.level === 0) converted.title = "root"
+                return converted
+            }
+
+            let res = await fetch("/debug/files")
+            res = await res.json()
+            const root = convert(res)
+            return root
+        }
+
+        const render_tree = async () => {
+            const tree_data = await getData()
+
+            layui.use(() => {
+                layui.tree.render({
+                    elem: '#tree',
+                    data: [tree_data],
+                    showLine: true,
+                    onlyIconControl: false,
+                    customOperate: true,
+                    click: async obj => {
+                        const data = obj.data
+                        if (data.href.includes("audio")) {
+                            audio_displayer.src = data.href
+                        } else if (data.href.includes("info")) {
+                            let res = await fetch(data.href)
+                            res = await res.text()
+                            layer.open({
+                                type: 1,
+                                offset: "auto",
+                                anim: 0,
+                                shade: 0.1,
+                                resize: true,
+                                shadeClose: true,
+                                title: "预览",
+                                content: `<pre id="info_displayer" class="layui-code">${res}</pre>`
+                            })
+                            layui.use(() => {
+                                layui.code({
+                                    elem: "#info_displayer",
+                                    lang: "json",
+                                    langMarker: true,
+                                });
+                            })
+                        }
+                    }
+                })
+                createOperators(tree_data)
+            })
+        }
+
+        window.onload = render_tree
+    </script>
+</body>
+
+</html>

@@ -16,10 +16,22 @@ from utils import ndarray_to_base64_no_header
 @click.option("--loudness", default=20.0)
 @click.option("--base64", is_flag=True)
 def main(ip, port, speakers_path, loudness, base64):
+    audio_fmts = ["wav", "mp3"]
+
     for speaker_id in os.listdir(speakers_path):
-        audio_path = os.path.join(speakers_path, speaker_id, "audio.mp3")
+        audio_paths = list(
+            filter(
+                os.path.exists,
+                [
+                    os.path.join(speakers_path, speaker_id, f"audio.{fmt}")
+                    for fmt in audio_fmts
+                ],
+            )
+        )
         transcript_path = os.path.join(speakers_path, speaker_id, "transcript.txt")
-        if os.path.exists(audio_path) and os.path.exists(transcript_path):
+
+        if len(audio_paths) > 0 and os.path.exists(transcript_path):
+            audio_path = audio_paths[0]
             if base64:
                 audio_ndarray, _ = librosa.load(audio_path, sr=16000)
                 audio = ndarray_to_base64_no_header(audio_ndarray)

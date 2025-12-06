@@ -4,7 +4,7 @@
 
 参考 [CosyVoice2](https://github.com/FunAudioLLM/CosyVoice) 修改的 CosyVoice2 Websocket API，支持以下特性：
 
-1. 使用 `vLLM 0.7` 加速推理；
+1. 使用 `vLLM` 加速推理；
 2. 支持流式输入和流式输出；
 3. 支持多格式音频（opus、pcm、wav、mp3、flac、aac、m4a、wav，默认是 wav）和多采样率输出；
 4. 支持克隆音色；
@@ -12,6 +12,8 @@
 6. 支持保存和加载已克隆音色。
 
 ## Updates
+
+- [2025/12/06] 新增 `debug` 模式，开启后访问 `ip:port/debug`; 修复 `bistream` 模式。
 
 - [2025/09/03] 新增支持 `vLLM 0.8`、`vLLM 0.9` 和 `SGLang`；提高长文本生成质量；简化部署；同步官方代码。
 

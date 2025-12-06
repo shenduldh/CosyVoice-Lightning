@@ -3,3 +3,5 @@ logs
 results
 examples
 assets/cache
+api/debug/saved
+api/debug/temp

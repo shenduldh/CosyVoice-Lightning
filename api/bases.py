@@ -37,6 +37,7 @@ class TTSInput(BaseModel):
     audio_format: str = Field(description="合成音频格式", default="wav")
     sample_rate: int = Field(description="合成音频采样率", default=24000)
     instruct_text: Union[str | None] = Field(description="指令文本", default=None)
+    return_base64: bool = Field(description="返回 base64", default=True)
 
 
 class TTSOutput(BaseModel):

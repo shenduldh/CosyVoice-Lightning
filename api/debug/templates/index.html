@@ -1,0 +1,361 @@
+<!DOCTYPE html>
+
+<html lang="zh-CN">
+
+<head>
+    <meta charset="UTF-8">
+    <title>TTS Debug</title>
+    <script src="{{ url_for('debug_static', path='vue@3.5.25.global.prod.js') }}"></script>
+    <script src="{{ url_for('debug_static', path='naive-ui@2.43.2.prod.js') }}"></script>
+    <script src="{{ url_for('debug_static', path='highlight/highlight.min.js') }}"></script>
+    <script src="{{ url_for('debug_static', path='utils.js') }}"></script>
+    <style>
+        audio {
+            background-color: #77777725;
+            border-radius: 0;
+        }
+
+        audio::-webkit-media-controls-enclosure {
+            background-color: unset;
+        }
+    </style>
+</head>
+
+<body>
+    <div id="app">
+        <n-config-provider :hljs="hljs">
+            <n-flex size="small" justify="center" style="position: sticky; top: 0; z-index: 10">
+                <n-card style="max-width: 400px; min-width: 200px" hoverable>
+                    <n-form label-placement="left" label-width="auto" size="small">
+                        <n-form-item label="音色 ID">
+                            <n-input type="text" v-model:value="cloneParams.id" clearable />
+                        </n-form-item>
+                        <n-form-item label="音量大小">
+                            <n-input-number v-model:value="cloneParams.loudness" />
+                        </n-form-item>
+                        <n-form-item label="参考文本">
+                            <n-input type="textarea" v-model:value="cloneParams.text" clearable />
+                        </n-form-item>
+                        <n-form-item label="参考音频">
+                            <n-upload directory-dnd accept=".mp3,.wav" v-model:file-list="cloneParams.audio" max="1">
+                                <n-upload-dragger>
+                                    <div>
+                                        <n-icon size="24" depth="4">
+                                            <svg xmlns="http://www.w3.org/2000/svg"
+                                                xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="0 0 24 24">
+                                                <path
+                                                    d="M19.35 10.04A7.49 7.49 0 0 0 12 4C9.11 4 6.6 5.64 5.35 8.04A5.994 5.994 0 0 0 0 14c0 3.31 2.69 6 6 6h13c2.76 0 5-2.24 5-5c0-2.64-2.05-4.78-4.65-4.96zM14 13v4h-4v-4H7l4.65-4.65c.2-.2.51-.2.71 0L17 13h-3z"
+                                                    fill="currentColor"></path>
+                                            </svg>
+                                        </n-icon>
+                                    </div>
+                                    <n-text depth="3">点击或者拖动到此处来上传</n-text>
+                                </n-upload-dragger>
+                            </n-upload>
+                        </n-form-item>
+                        <n-form-item label=" ">
+                            <n-button type="success" @click="clone" :loading="cloneLoading">克隆</n-button>
+                        </n-form-item>
+                    </n-form>
+                </n-card>
+
+                <n-card style="max-width: 400px" hoverable>
+                    <n-form label-placement="left" label-width="auto" size="small">
+                        <n-form-item label="音色 ID">
+                            <n-select filterable multiple v-model:value="deleteIDs" :options="promptIDs"
+                                placeholder="选择要删除的音色 ID" @focus="updatePromptIDs" clearable />
+                        </n-form-item>
+                        <n-form-item label=" ">
+                            <n-button type="error" @click="deletePromptIDs" :loading="deleteLoading">删除</n-button>
+                        </n-form-item>
+                    </n-form>
+                </n-card>
+
+                <n-card style="max-width: 400px" hoverable>
+                    <n-form label-placement="left" label-width="auto" size="small">
+                        <n-form-item label="音色 ID">
+                            <n-select filterable v-model:value="generateParams.id" :options="promptIDs"
+                                placeholder="选择要合成的音色 ID" @focus="updatePromptIDs" clearable />
+                        </n-form-item>
+                        <n-form-item label="合成文本">
+                            <n-input type="textarea" v-model:value="generateParams.text" clearable />
+                        </n-form-item>
+                        <n-form-item label=" ">
+                            <n-button type="success" @click="generate" :loading="generateLoading">合成</n-button>
+                        </n-form-item>
+                    </n-form>
+                </n-card>
+            </n-flex>
+
+            <div style="margin-bottom: 60px">
+                <n-button type="info" @click="updateData" size="small" dashed>刷新数据</n-button>
+                <n-tree block-line :data="data" :render-label="renderLabel" v-model:expanded-keys="expKeys" />
+            </div>
+
+            <div style="position: fixed; bottom: 0">
+                <audio ref="playerRef" controls style="width: 100vw"></audio>
+            </div>
+
+            <n-modal v-model:show="showModal">
+                <n-card title="预览" :bordered="false">
+                    <n-code :code="jsonPreview" language="json" />
+                </n-card>
+            </n-modal>
+        </n-config-provider>
+        <a ref="downloaderRef"></a>
+    </div>
+    <script>
+        const { NButton, NIcon, NText, NFlex, createDiscreteApi } = naive
+        const { createApp, ref, reactive, h, onMounted, resolveDirective } = Vue
+
+        const fetchData = async () => {
+            const keys = []
+            const convert = d => {
+                const converted = {
+                    label: d.name,
+                    key: d.level + d.name,
+                    type: d.type,
+                    dl_href: d.dl_href,
+                    level: d.level,
+                }
+                if (d.type === "folder") {
+                    converted.del_href = d.del_href
+                    converted.children = d.children.map(convert)
+                }
+                if (d.level < 3) keys.push(converted.key)
+                return converted
+            }
+            let res = await fetch("/debug/files")
+            res = await res.json()
+            res = convert(res)
+            return { res, keys }
+        }
+
+        createApp({
+            setup() {
+                const data = ref([])
+                const expKeys = ref([])
+                const showModal = ref(false)
+                const jsonPreview = ref(null)
+                const playerRef = ref(undefined)
+                const downloaderRef = ref(undefined)
+                const cloneParams = reactive({ id: "", text: "", audio: [], loudness: 30 })
+                const promptIDs = ref([])
+                const generateParams = reactive({ id: null, text: "" })
+                const deleteIDs = ref([])
+                const cloneLoading = ref(false)
+                const generateLoading = ref(false)
+                const deleteLoading = ref(false)
+
+                const { dialog, message, loadingBar } = createDiscreteApi(["dialog", "message"])
+
+                const updateData = async () => {
+                    const { res, keys } = await fetchData()
+                    data.value = [res]
+                    keys.forEach(i => { if (!expKeys.value.includes(i)) expKeys.value.push(i) })
+                }
+
+                onMounted(updateData)
+
+                const renderLabel = ({ option }) => {
+                    const showSuffix = ref(false)
+                    const { label, key, type, dl_href, del_href, level } = option
+                    const is_folder = type === "folder"
+
+                    let name = label
+                    if (level == 0) name = "root"
+                    else if (level == 1) {
+                        const [year, month] = label.split("-")
+                        name = `${year}年${month}月`
+                    } else if (level == 2) name = `${label}日`
+                    else if (level == 3) name = `${label}时`
+                    else if (level == 4) {
+                        const [time, id] = label.split("_")
+                        const [minute, second] = time.split("-")
+                        name = `${minute}分${second}秒-${id}`
+                    }
+
+                    return h(
+                        NFlex,
+                        {
+                            align: "center",
+                            async onClick() {
+                                if (dl_href.endsWith(".wav")) {
+                                    playerRef.value.setAttribute("autoplay", true)
+                                    playerRef.value.src = dl_href
+                                } else if (dl_href.endsWith(".json")) {
+                                    let res = await fetch(dl_href)
+                                    res = await res.text()
+                                    showModal.value = true
+                                    jsonPreview.value = res
+                                }
+                            },
+                            onMouseover() { showSuffix.value = is_folder },
+                            onMouseleave() { showSuffix.value = false },
+                        },
+                        {
+                            default: () => [
+                                h(NText, {
+                                    onClick() {
+                                        if (is_folder) {
+                                            if (expKeys.value.includes(key)) expKeys.value.splice(expKeys.value.indexOf(key), 1)
+                                            else expKeys.value.push(key)
+                                        }
+                                    }
+                                }, name),
+                                h(NButton, {
+                                    text: true,
+                                    type: "success",
+                                    size: "tiny",
+                                    style: { display: showSuffix.value ? "block" : "none" },
+                                    onClick() { downloaderRef.value.href = dl_href; downloaderRef.value.click() }
+                                }, "下载"),
+                                h(NButton, {
+                                    text: true,
+                                    type: "error",
+                                    size: "tiny",
+                                    style: { display: showSuffix.value ? "block" : "none" },
+                                    onClick() {
+                                        dialog.warning({
+                                            title: "警告",
+                                            content: `你确定删除目录“${name}”？`,
+                                            positiveText: "确定",
+                                            negativeText: "取消",
+                                            draggable: true,
+                                            async onPositiveClick() {
+                                                await fetch(del_href)
+                                                await updateData()
+                                                message.success("已删除")
+                                            }
+                                        })
+                                    }
+                                }, "删除"),
+                            ]
+                        }
+                    )
+                }
+
+                const clone = () => {
+                    const { id, text, loudness, audio } = cloneParams
+                    if (id.length === 0 || text.length === 0 || audio.length === 0) {
+                        message.error("请补充克隆参数")
+                        return
+                    }
+
+                    cloneLoading.value = true
+
+                    const reader = new FileReader()
+                    reader.readAsArrayBuffer(audio[0].file)
+                    reader.onload = async () => {
+                        const audioBuffer = await arrayBufferToAudioBuffer(reader.result)
+                        const sampleRate = audioBuffer.sampleRate
+                        const audioBase64 = arrayBufferToBase64(audioBufferToWav(audioBuffer, 16))
+                        let res = await fetch("/clone", {
+                            method: "post",
+                            headers: { "Content-Type": "application/json" },
+                            body: JSON.stringify({
+                                "prompt_text": text,
+                                "prompt_audio": audioBase64,
+                                "prompt_id": id,
+                                "audio_format": "wav",
+                                "sample_rate": sampleRate,
+                                "loudness": loudness,
+                            })
+                        })
+                        res = await res.json()
+
+                        if (res.existed) message.warning(`“${res.prompt_id}”已存在`)
+                        else message.success(`“${res.prompt_id}”克隆成功`)
+
+                        cloneLoading.value = false
+                    }
+                }
+
+                const updatePromptIDs = async () => {
+                    let res = await fetch("/speakers")
+                    res = await res.json()
+                    promptIDs.value = res.map(i => ({ value: i, label: i }))
+                }
+
+                const generate = () => {
+                    const { id, text } = generateParams
+                    if (id == null || id.length == 0 || text.length == 0) {
+                        message.error("请补充合成参数")
+                        return
+                    }
+
+                    generateLoading.value = true
+
+                    let audioData = ""
+                    const ws = new WebSocket(`${location.protocol.startsWith("https") ? "wss:" : "ws:"}//${location.host}/tts`)
+                    ws.onopen = () => {
+                        ws.send(JSON.stringify({ req_params: { prompt_id: id, audio_format: "pcm", sample_rate: 24000, instruct_text: null } }))
+                        ws.send(JSON.stringify({ "text": text, "done": true }))
+                    }
+                    ws.onmessage = async e => {
+                        const msg = JSON.parse(e.data)
+                        console.log(msg)
+                        if (msg.data && msg.data.length > 0) audioData += msg.data
+                        if (msg.is_end) {
+                            ws.close()
+                            let arrayBuffer = Uint8Array.from(atob(audioData), c => c.charCodeAt(0)).buffer
+                            arrayBuffer = int16ArrayBufferToWav(arrayBuffer, 24000, 16, 1)
+                            playerRef.value.setAttribute("autoplay", true)
+                            playerRef.value.src = URL.createObjectURL(new Blob([arrayBuffer], { mineType: "audio/wav" }))
+                            playerRef.value.title = `${id}.wav`
+                            playerRef.value.onloadedmetadata = async () => {
+                                message.success("合成完成")
+                                generateLoading.value = false
+                                await updateData()
+                            }
+                        }
+                    }
+                }
+
+                const deletePromptIDs = async () => {
+                    if (deleteIDs.value.length === 0) {
+                        message.error("请选择要删除的音色 ID")
+                        return
+                    }
+
+                    deleteLoading.value = true
+
+                    let res = await fetch("/remove", {
+                        method: "post", headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({ prompt_ids: deleteIDs.value }),
+                    })
+                    res = await res.json(res)
+                    message.success(`“${res.removed_speakers.join("、")}” 已删除。`)
+                    deleteIDs.value = []
+
+                    deleteLoading.value = false
+                }
+
+                return {
+                    data,
+                    showModal,
+                    expKeys,
+                    cloneParams,
+                    generateParams,
+                    deleteIDs,
+                    promptIDs,
+                    updateData,
+                    generate,
+                    clone,
+                    updatePromptIDs,
+                    deletePromptIDs,
+                    cloneLoading,
+                    generateLoading,
+                    deleteLoading,
+                    renderLabel,
+                    jsonPreview,
+                    downloaderRef,
+                    playerRef,
+                    hljs,
+                }
+            }
+        }).use(naive).mount('#app')
+    </script>
+</body>
+
+</html>

@@ -1,6 +1,6 @@
 import os
 import torch
-from typing import List, Dict
+from typing import List, Dict, AsyncGenerator
 from hyperpyyaml import load_hyperpyyaml
 from copy import deepcopy
 from ruamel import yaml
@@ -64,9 +64,25 @@ WAIT_INTERVAL = 1e-7
 TIMEOUT = 30.0
 
 
+def cache_output(generator_or_tensors: AsyncGenerator | torch.Tensor):
+    if isinstance(generator_or_tensors, torch.Tensor):
+        tensors = generator_or_tensors
+        return tensors, {"cached": tensors.cpu()}
+
+    generator = generator_or_tensors
+    temp = {"cached": torch.empty((1, 0), device="cpu")}
+
+    async def cached_generator():
+        async for i in generator:
+            yield i
+            temp["cached"] = torch.cat([temp["cached"], i.cpu()], dim=1)
+
+    return cached_generator(), temp
+
+
 class ModelActor:
     def ready(self):
-        print(f"{self.__class__.__name__} is ready.")
+        return True
 
 
 @ray.remote(num_gpus=FLOW_USED_NUM_GPUS, max_concurrency=100)
@@ -123,8 +139,8 @@ class FlowActor(ModelActor):
             speech_mel = speech_mel[:, :, offset * self.flow_model.token_mel_ratio :]
             torch.cuda.empty_cache()
             return speech_mel, id, index
-        except:
-            print(f"Error in flow generation: {traceback.format_exc()}")
+        except Exception as e:
+            return e
 
     def build(self):
         with open(f"{self.model_dir}/cosyvoice2.yaml", "r") as f:
@@ -219,8 +235,8 @@ class HiftActor(ModelActor):
             )
             torch.cuda.empty_cache()
             return speech_pcm, new_source, id, index
-        except:
-            print(f"Error in hift generation: {traceback.format_exc()}")
+        except Exception as e:
+            return e
 
     def build(self):
         with open(f"{self.model_dir}/cosyvoice2.yaml", "r") as f:
@@ -277,6 +293,7 @@ class Scheduler:
         self.set_config(model_dir)
 
         self.llm = CosyVoice2LLMWrapper(model_dir)
+        logger.info("LLM is ready.")
 
         flow_actors = [
             FlowActor.remote(
@@ -284,14 +301,16 @@ class Scheduler:
             )
             for _ in range(flow_count)
         ]
-        ray.get([a.ready.remote() for a in flow_actors])
+        if all(ray.get([a.ready.remote() for a in flow_actors])):
+            logger.info("Flow actors are ready.")
         self.flow_pool = ActorPool(flow_actors)
 
         hift_actors = [
             HiftActor.remote(model_dir, COMMON_OVERRIDES, do_compile)
             for _ in range(hift_count)
         ]
-        ray.get([a.ready.remote() for a in hift_actors])
+        if all(ray.get([a.ready.remote() for a in hift_actors])):
+            logger.info("Hift actors are ready.")
         self.hift_pool = ActorPool(hift_actors)
 
         self.thread_pool = ThreadPoolExecutor()
@@ -314,11 +333,13 @@ class Scheduler:
         while True:
             try:
                 if self.flow_pool.has_next():
-                    outputs = self.flow_pool.get_next_unordered()
-                    if outputs is not None:
-                        speech_mel, id, index = outputs
+                    res = self.flow_pool.get_next_unordered()
+                    if not isinstance(res, Exception):
+                        speech_mel, id, index = res
                         if id in self.cache:
                             self.cache[id].mels[index] = speech_mel
+                    else:
+                        raise res
                 else:
                     time.sleep(WAIT_INTERVAL)
             except:
@@ -328,9 +349,9 @@ class Scheduler:
         while True:
             try:
                 if self.hift_pool.has_next():
-                    outputs = self.hift_pool.get_next_unordered()
-                    if outputs is not None:
-                        tts_pcm, tts_source, id, index = outputs
+                    res = self.hift_pool.get_next_unordered()
+                    if not isinstance(res, Exception):
+                        tts_pcm, tts_source, id, index = res
                         if id in self.cache:
                             req = self.cache[id]
                             req.sources[index] = tts_source
@@ -341,6 +362,8 @@ class Scheduler:
                                     self.speech_window,
                                 )
                             req.pcms[index] = tts_pcm
+                    else:
+                        raise res
                 else:
                     time.sleep(WAIT_INTERVAL)
             except:
@@ -389,11 +412,15 @@ class Scheduler:
         )
 
     async def llm_job(
-        self, req: Request, keep_prompt=False, min_prefix_count=1, max_length=512
+        self,
+        req: Request,
+        keep_original_prompt=False,
+        min_prefix_count=1,
+        max_length=512,
     ):
         try:
-            prompt_text_tokens = req.prompt_text_tokens.cpu()
-            prompt_speech_tokens = req.llm_prompt_speech_tokens.cpu()
+            ptt_orig = req.prompt_text_tokens.cpu()
+            pst_orig = req.llm_prompt_speech_tokens.cpu()
             curr_count = 0
             curr_len = []
             prefix_ptt = []
@@ -402,25 +429,26 @@ class Scheduler:
 
             async for tts_text_tokens in req.input_generator:
                 if len(prefix_ptt) > 0:
-                    if keep_prompt:
-                        ptt_in = torch.cat([prompt_text_tokens] + prefix_ptt, dim=1)
-                        pst_in = torch.cat([prompt_speech_tokens] + prefix_pst, dim=1)
+                    if keep_original_prompt:
+                        ptt_input = torch.cat([ptt_orig] + prefix_ptt, dim=1)
+                        pst_input = torch.cat([pst_orig] + prefix_pst, dim=1)
                     else:
-                        ptt_in = torch.cat(prefix_ptt, dim=1)
-                        pst_in = torch.cat(prefix_pst, dim=1)
+                        ptt_input = torch.cat(prefix_ptt, dim=1)
+                        pst_input = torch.cat(prefix_pst, dim=1)
                 else:
-                    ptt_in = prompt_text_tokens
-                    pst_in = prompt_speech_tokens
+                    ptt_input = ptt_orig
+                    pst_input = pst_orig
 
                 last_speech_tokens.clear()
-                async_generator = self.llm(tts_text_tokens, ptt_in, pst_in, req.id)
-                async for speech_token in async_generator:
+                tt_input, temp = cache_output(tts_text_tokens)
+                output_generator = self.llm(tt_input, ptt_input, pst_input, req.id)
+                async for speech_token in output_generator:
                     req.tokens.append(speech_token)
                     last_speech_tokens.append(speech_token)
 
                 curr_count += 1
-                curr_len.append(tts_text_tokens.shape[1] + len(last_speech_tokens))
-                prefix_ptt.append(tts_text_tokens.cpu())
+                curr_len.append(temp["cached"].shape[1] + len(last_speech_tokens))
+                prefix_ptt.append(temp["cached"])
                 prefix_pst.append(torch.tensor([last_speech_tokens]).cpu())
 
                 while curr_count > min_prefix_count and sum(curr_len) > max_length:
@@ -428,6 +456,7 @@ class Scheduler:
                     curr_len.pop(0)
                     prefix_ptt.pop(0)
                     prefix_pst.pop(0)
+
         except BaseException as e:
             req.stop = True
             if not isinstance(e, asyncio.CancelledError):

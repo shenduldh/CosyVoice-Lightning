@@ -153,7 +153,7 @@ def test_mttff(num_requests=1, test_times=4, saved_root="./results"):
 
     mean_ttffs = []
     for i in range(test_times):
-        print(f"========== {i+1}/{test_times} ==========")
+        print(f"========== {i + 1}/{test_times} ==========")
         tasks = []
         with ProcessPoolExecutor(max_workers=num_requests) as pool:
             for j in range(num_requests):
