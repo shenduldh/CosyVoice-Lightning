@@ -13,7 +13,7 @@
 
 ## Updates
 
-- [2025/12/06] 新增 `debug` 模式，开启后访问 `ip:port/debug`; 修复 `bistream` 模式。
+- [2025/12/06] 新增 `debug` 模式，开启后访问 `http://ip:port/debug`；修复 `bistream` 模式。
 
 - [2025/09/03] 新增支持 `vLLM 0.8`、`vLLM 0.9` 和 `SGLang`；提高长文本生成质量；简化部署；同步官方代码。
 
