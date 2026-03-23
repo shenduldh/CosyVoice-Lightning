@@ -8,7 +8,8 @@ import soundfile as sf
 import io
 import base64
 import struct
-from typing import AsyncGenerator, Generator, Union, Literal, overload
+from typing import AsyncGenerator, Generator, Union, Literal
+from pathlib import Path
 import traceback
 from tempfile import NamedTemporaryFile
 import zhon
@@ -16,14 +17,14 @@ import string
 import re
 
 
-__project_root__ = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+__root__ = Path(__file__).parents[1].as_posix()
 
 
 def path_to_root(*paths):
     if len(paths) > 0:
-        return os.path.join(__project_root__, *paths)
+        return os.path.join(__root__, *paths)
     else:
-        return __project_root__
+        return __root__
 
 
 def truncate_long_str(obj, max_len=70, ellipsis="......"):
@@ -43,71 +44,84 @@ def whats_wrong_with(e):
     return traceback.format_exception_only(e)[-1].strip()
 
 
+class Stream:
+    def __init__(self, capacity: int, dtype=np.float32):
+        self.capacity = capacity
+        self.buffer = np.zeros(self.capacity * 2, dtype=dtype)
+        self.head = 0
+        self.rear = 0
+        self.size = 0
+
+    def add(self, data: np.ndarray):
+        data_size = len(data)
+        if data_size > self.capacity:
+            data = data[-self.capacity :]
+            data_size = self.capacity
+
+        end = self.rear + data_size
+
+        # write twice to both the original position and mirrored position
+        if end <= self.capacity:
+            self.buffer[self.rear : end] = data
+            self.buffer[self.rear + self.capacity : end + self.capacity] = data  # mirror
+        else:
+            pivot = self.capacity - self.rear
+            self.buffer[self.rear : self.capacity] = data[:pivot]
+            self.buffer[self.rear + self.capacity : self.capacity + self.capacity] = data[:pivot]  # mirror
+            self.buffer[: data_size - pivot] = data[pivot:]
+            self.buffer[self.capacity : self.capacity + data_size - pivot] = data[pivot:]  # mirror
+
+        self.rear = (self.rear + data_size) % self.capacity
+        new_size = self.size + data_size
+        if new_size > self.capacity:
+            self.head = self.rear
+            self.size = self.capacity
+        else:
+            self.size = new_size
+
+    def read(self, length: int):
+        if self.size < length:
+            return None
+
+        data = self.buffer[self.head : self.head + length]
+        self.head = (self.head + length) % self.capacity
+        self.size -= length
+        return data
+
+
 async def async_repack(
-    generator: AsyncGenerator[np.ndarray, None], min_size=0.0, max_num=100
+    generator: AsyncGenerator[np.ndarray, None], min_size=16000 * 1, max_size=16000 * 10, capacity=None
 ) -> AsyncGenerator[np.ndarray, None]:
-    buffer = []
-    buffer_size = 0
-
+    capacity = max_size * 2 if capacity is None else capacity
+    stream = Stream(capacity, dtype=np.float32)
     async for chunk in generator:
-        buffer.append(chunk)
-        buffer_size += chunk.shape[-1]
-
-        while len(buffer) > max_num:
-            if buffer:
-                yield np.concatenate(buffer)
-                buffer.clear()
-                buffer_size = 0
-
-        while buffer_size >= min_size:
-            output = []
-            output_size = 0
-            while buffer and output_size < min_size:
-                block = buffer.pop(0)
-                output.append(block)
-                output_size += len(block)
-                buffer_size -= len(block)
-
-            yield np.concatenate(output)
-
-    if buffer:
-        yield np.concatenate(buffer)
+        stream.add(chunk)
+        while stream.size >= min_size:
+            output_size = stream.size if stream.size < max_size else max_size
+            output = stream.read(output_size)
+            yield output
+    if stream.size > 0:
+        output = stream.read(stream.size)
+        yield output
 
 
 def repack(
-    generator: Generator[np.ndarray, None, None], min_size=0.0, max_num=100
+    generator: Generator[np.ndarray, None, None], min_size=16000 * 1, max_size=16000 * 10, capacity=None
 ) -> Generator[np.ndarray, None, None]:
-    buffer = []
-    buffer_size = 0
-
+    capacity = max_size * 2 if capacity is None else capacity
+    stream = Stream(capacity, dtype=np.float32)
     for chunk in generator:
-        buffer.append(chunk)
-        buffer_size += chunk.shape[-1]
-
-        while len(buffer) > max_num:
-            if buffer:
-                yield np.concatenate(buffer)
-                buffer.clear()
-                buffer_size = 0
-
-        while buffer_size >= min_size:
-            output = []
-            output_size = 0
-            while buffer and output_size < min_size:
-                block = buffer.pop(0)
-                output.append(block)
-                output_size += len(block)
-                buffer_size -= len(block)
-
-            yield np.concatenate(output)
-
-    if buffer:
-        yield np.concatenate(buffer)
+        stream.add(chunk)
+        while stream.size >= min_size:
+            output_size = stream.size if stream.size < max_size else max_size
+            output = stream.read(output_size)
+            yield output
+    if stream.size > 0:
+        output = stream.read(stream.size)
+        yield output
 
 
-def add_wav_header(
-    audio_bytes: bytes, sample_rate=16000, num_channels=1, bits_per_sample=16
-):
+def add_wav_header(audio_bytes: bytes, sample_rate=16000, num_channels=1, bits_per_sample=16):
     if audio_bytes.startswith("RIFF".encode()):
         return audio_bytes
 
@@ -122,12 +136,8 @@ def add_wav_header(
     header += b"\x01\x00"  # audio format (1 is PCM)
     header += UNSIGNED_SHORT.pack(num_channels)
     header += SIGNED_INT.pack(sample_rate)
-    header += SIGNED_INT.pack(
-        sample_rate * num_channels * bits_per_sample // 8
-    )  # bytes per sample
-    header += UNSIGNED_SHORT.pack(
-        num_channels * bits_per_sample // 8
-    )  # block alignment
+    header += SIGNED_INT.pack(sample_rate * num_channels * bits_per_sample // 8)  # bytes per sample
+    header += UNSIGNED_SHORT.pack(num_channels * bits_per_sample // 8)  # block alignment
     header += UNSIGNED_SHORT.pack(bits_per_sample)
     header += b"data"
     header += SIGNED_INT.pack(num_samples)
@@ -143,11 +153,7 @@ offset = min_short + abs_max_short
 
 
 def float32_to_int16(audio_ndarray: np.ndarray):
-    return (
-        (audio_ndarray * abs_max_short + offset)
-        .clip(min_short, max_short)
-        .astype(np.short)
-    )
+    return (audio_ndarray * abs_max_short + offset).clip(min_short, max_short).astype(np.short)
 
 
 def int16_to_float32(audio_ndarray: np.ndarray):
@@ -167,12 +173,12 @@ def save_audio(audio_ndarray: np.ndarray, path: str, sample_rate=16000):
     sf.write(path, audio_ndarray, samplerate=sample_rate)
 
 
-def ndarray_to_pydub(audio_ndarray: np.ndarray, sample_rate=16000) -> AudioSegment:
+def ndarray_to_pydub(audio_ndarray: np.ndarray, sample_rate=16000, num_channels=1, sample_width=2) -> AudioSegment:
     audio_segment = AudioSegment.from_raw(
         io.BytesIO(float32_to_int16(audio_ndarray).tobytes()),
-        sample_width=2,
+        sample_width=sample_width,
         frame_rate=sample_rate,
-        channels=1,
+        channels=num_channels,
     )
     return audio_segment
 
@@ -220,13 +226,9 @@ def base64_no_header_to_ndarray(audio_base64: str, sample_rate=16000):
     return audio_ndarray
 
 
-def ndarray_to_base64_with_wav_header(
-    audio_ndarray: np.ndarray, sample_rate=16000, resample_rate=16000
-):
+def ndarray_to_base64_with_wav_header(audio_ndarray: np.ndarray, sample_rate=16000, resample_rate=16000):
     if resample_rate != sample_rate:
-        audio_ndarray = librosa.resample(
-            audio_ndarray, orig_sr=sample_rate, target_sr=resample_rate
-        )
+        audio_ndarray = librosa.resample(audio_ndarray, orig_sr=sample_rate, target_sr=resample_rate)
     audio_bytes = float32_to_int16(to_mono(audio_ndarray)).tobytes()
     audio_bytes = add_wav_header(audio_bytes, sample_rate)
     audio_base64 = base64.b64encode(audio_bytes).decode("utf-8")
@@ -291,16 +293,10 @@ def any_format_to_ndarray(
     return audio_ndarray
 
 
-def format_ndarray_to_base64(
-    audio_ndarray: np.ndarray, sample_rate: int, resample_rate: int, format: str
-):
+def format_ndarray_to_base64(audio_ndarray: np.ndarray, sample_rate: int, resample_rate: int, format: str):
     if format == "wav":
-        return ndarray_to_base64_with_wav_header(
-            audio_ndarray, sample_rate, resample_rate
-        )
-    return ndarray_to_any_format(
-        audio_ndarray, sample_rate, resample_rate, format, return_base64=True
-    )
+        return ndarray_to_base64_with_wav_header(audio_ndarray, sample_rate, resample_rate)
+    return ndarray_to_any_format(audio_ndarray, sample_rate, resample_rate, format, return_base64=True)
 
 
 def remove_silence(
@@ -312,9 +308,7 @@ def remove_silence(
     frame_length=440,
     hop_length=220,
 ):
-    _, (s, e) = librosa.effects.trim(
-        audio_ndarray, top_db=top_db, frame_length=frame_length, hop_length=hop_length
-    )
+    _, (s, e) = librosa.effects.trim(audio_ndarray, top_db=top_db, frame_length=frame_length, hop_length=hop_length)
     s = int(s - left_retention_seconds * sample_rate)
     s = 0 if s < 0 else s
     e = int(e + right_retention_seconds * sample_rate)

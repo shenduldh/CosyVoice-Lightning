@@ -338,8 +338,8 @@ def make_parquets(
 @click.option("--speech_tokenizer", help="Path of the speech tokenizer onnx model.")
 @click.option("--audio_suffix", default=".wav")
 @click.option("--text_suffix", default=".txt")
-@click.option("--apply_dpo", default=False)
 @click.option("--reject_audio_suffix", default=".reject.wav")
+@click.option("--apply_dpo", default=False)
 @click.option("--num_cpus", default=os.cpu_count())
 @click.option("--num_gpus", default=2)
 @click.option("--num_workers", default=20)
@@ -350,8 +350,8 @@ def main(
     speech_tokenizer,
     audio_suffix,
     text_suffix,
-    apply_dpo,
     reject_audio_suffix,
+    apply_dpo,
     num_cpus,
     num_gpus,
     num_workers,

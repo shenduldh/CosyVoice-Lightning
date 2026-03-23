@@ -1,4 +1,5 @@
 import os
+from typing import Optional
 import zipfile
 from fastapi import FastAPI, APIRouter
 from fastapi.responses import FileResponse
@@ -23,11 +24,13 @@ from pytz import timezone
 import time
 
 
-def debug_print(msg: str):
-    print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | debug - {msg}")
+def debug_print(msg):
+    print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | Debug - {msg}")
 
 
-def clean_expired(root: Path, max_hours=24 * 14, date=None, this_dir: Path = None):
+def clean_expired(
+    root: Path, max_hours=24 * 14, date=None, this_dir: Optional[Path] = None
+):
     if date is None:
         date = datetime.now()
 
@@ -90,52 +93,15 @@ def zip_folder(folder_path, output_path):
                 zipf.write(file_path, arcname)
 
 
-def set_debug_routing(router: APIRouter):
-    @router.get("/")
-    async def index(request: Request):
-        return debug.templates.TemplateResponse("index.html", {"request": request})
-
-    @router.get("/files")
-    async def files():
-        return debug.get_file_tree()
-
-    @router.get("/dl/file/{file_name:path}")
-    async def download_file(file_name: str):
-        file_path = debug.saved_path / file_name
-        return FileResponse(file_path, filename=file_path.name)
-
-    @router.get("/dl/folder/{folder_name:path}")
-    async def download_folder(folder_name: str):
-        md5 = hashlib.md5()
-        md5.update(str(folder_name).encode())
-        zip_path = str(debug.temp_path / md5.hexdigest()) + ".zip"
-        folder_path = debug.saved_path / folder_name
-
-        if not os.path.exists(zip_path):
-            zip_folder(str(folder_path), zip_path)
-
-        return FileResponse(
-            zip_path, filename=f"{folder_path.name}.zip", media_type="application/zip"
-        )
-
-    @router.get("/del/{target_path:path}")
-    async def delete(target_path: str):
-        shutil.rmtree(debug.saved_path / target_path, ignore_errors=True)
-        if not os.path.exists(debug.saved_path):
-            os.makedirs(debug.saved_path, exist_ok=True)
-        return {"status": "ok"}
-
-
-class Debug:
-    def __init__(self):
+class Debugger:
+    def __init__(self, enabled=False):
         self.templates = Jinja2Templates(path_to_root("api", "debug", "templates"))
         host_id = f"{os.environ['HOST']}_{os.environ['PORT']}"
         self.saved_path = Path(path_to_root("api", "debug", "saved", host_id))
         self.temp_path = Path(path_to_root("api", "debug", "temp", host_id))
         self.static_path = path_to_root("api", "debug", "static")
         self.data = defaultdict(lambda: {"chunks": [], "text": []})
-        self.router = None
-        self.enabled = False
+        self.enabled = enabled
 
     def add_chunk(self, req_id: str, audio_chunk: np.ndarray):
         if self.enabled:
@@ -145,12 +111,12 @@ class Debug:
         if self.enabled:
             self.data[req_id]["text"] += text_clips
 
-    def save(self, req_id, tts_info, sample_rate):
+    def save(self, req_id, tts_task, sample_rate):
         if self.enabled:
-            year_month = tts_info.date.strftime("%Y-%m")
-            day = tts_info.date.strftime("%d")
-            hour = tts_info.date.strftime("%H")
-            time = tts_info.date.strftime("%M-%S")
+            year_month = tts_task.date.strftime("%Y-%m")
+            day = tts_task.date.strftime("%d")
+            hour = tts_task.date.strftime("%H")
+            time = tts_task.date.strftime("%M-%S")
             saved_dir = os.path.join(
                 self.saved_path, year_month, day, hour, f"{time}_{req_id}"
             )
@@ -162,12 +128,12 @@ class Debug:
                 save_audio(full_audio, saved_path, sample_rate)
             if len(self.data[req_id]["text"]) > 0:
                 info = {
-                    "speaker": tts_info.request.prompt_id,
-                    "instruct_text": tts_info.request.instruct_text,
-                    "resample_rate": tts_info.request.sample_rate,
-                    "audio_format": tts_info.request.audio_format,
+                    "speaker": tts_task.params.prompt_id,
+                    "instruct_text": tts_task.params.instruct_text,
+                    "resample_rate": tts_task.params.sample_rate,
+                    "audio_format": tts_task.params.audio_format,
                     "response_seconds": (
-                        datetime.now() - tts_info.date
+                        datetime.now() - tts_task.date
                     ).total_seconds(),
                     "tts_text": self.data[req_id]["text"],
                 }
@@ -175,10 +141,7 @@ class Debug:
                 with open(saved_path, "w", encoding="utf-8") as f:
                     json.dump(info, f, ensure_ascii=False, indent=4)
 
-    def set_enabled(self, is_enabled):
-        self.enabled = is_enabled is True
-
-    def get_file_tree(self, dir_path: Path = None, level=0):
+    def get_file_tree(self, dir_path: Optional[Path] = None, level=0):
         this_dir = self.saved_path if dir_path is None else dir_path
         tree = {
             "name": this_dir.name,
@@ -186,8 +149,8 @@ class Debug:
             "type": "folder",
             "level": level,
             "children": [],
-            "dl_href": f"{self.router.prefix}/dl/folder/{this_dir.relative_to(self.saved_path)}",
-            "del_href": f"{self.router.prefix}/del/{this_dir.relative_to(self.saved_path)}",
+            "dl_href": f"{self.prefix}/dl/folder/{this_dir.relative_to(self.saved_path)}",
+            "del_href": f"{self.prefix}/del/{this_dir.relative_to(self.saved_path)}",
         }
         for child in this_dir.iterdir():
             if child.is_dir():
@@ -199,7 +162,7 @@ class Debug:
                         "id": uuid.uuid4().hex,
                         "type": "file",
                         "level": level + 1,
-                        "dl_href": f"{self.router.prefix}/dl/file/{child.relative_to(self.saved_path)}",
+                        "dl_href": f"{self.prefix}/dl/file/{child.relative_to(self.saved_path)}",
                     }
                 )
         tree["children"].sort(key=lambda i: i["name"])
@@ -232,14 +195,49 @@ class Debug:
         self, app: FastAPI, router_prefix="/debug", static_routing_name="debug_static"
     ):
         if self.enabled:
-            self.router = APIRouter(prefix=router_prefix)
-            set_debug_routing(self.router)
+            router = APIRouter(prefix=router_prefix)
+            self.add_routes(router)
             app.mount(
                 f"/{static_routing_name}",
                 StaticFiles(directory=self.static_path),
                 name=static_routing_name,
             )
-            app.include_router(self.router)
+            app.include_router(router)
+            self.prefix = router.prefix
 
+    def add_routes(self, router: APIRouter):
+        @router.get("/")
+        async def index(request: Request):
+            return self.templates.TemplateResponse("index.html", {"request": request})
 
-debug = Debug()
+        @router.get("/files")
+        async def files():
+            return self.get_file_tree()
+
+        @router.get("/dl/file/{file_name:path}")
+        async def download_file(file_name: str):
+            file_path = self.saved_path / file_name
+            return FileResponse(file_path, filename=file_path.name)
+
+        @router.get("/dl/folder/{folder_name:path}")
+        async def download_folder(folder_name: str):
+            md5 = hashlib.md5()
+            md5.update(str(folder_name).encode())
+            zip_path = str(self.temp_path / md5.hexdigest()) + ".zip"
+            folder_path = self.saved_path / folder_name
+
+            if not os.path.exists(zip_path):
+                zip_folder(str(folder_path), zip_path)
+
+            return FileResponse(
+                zip_path,
+                filename=f"{folder_path.name}.zip",
+                media_type="application/zip",
+            )
+
+        @router.get("/del/{target_path:path}")
+        async def delete(target_path: str):
+            shutil.rmtree(self.saved_path / target_path, ignore_errors=True)
+            if not os.path.exists(self.saved_path):
+                os.makedirs(self.saved_path, exist_ok=True)
+            return {"status": "ok"}

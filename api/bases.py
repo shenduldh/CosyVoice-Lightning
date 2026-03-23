@@ -38,6 +38,12 @@ class TTSInput(BaseModel):
     sample_rate: int = Field(description="合成音频采样率", default=24000)
     instruct_text: Union[str | None] = Field(description="指令文本", default=None)
     return_base64: bool = Field(description="返回 base64", default=True)
+    # generation related
+    flow_window_size: int = Field(description="Flow 模型生成滑动窗口大小", default=500)
+    flow_window_shift: int = Field(description="Flow 模型生成滑动窗口步长", default=50)
+    llm_keep_orig_prompt: bool = Field(description="LLM 模型生成保留参考提示", default=True)
+    llm_min_cached_count: int = Field(description="LLM 模型生成最小缓存数量", default=1)
+    llm_max_cached_length: int = Field(description="LLM 模型生成最大缓存长度", default=512)
 
 
 class TTSOutput(BaseModel):
@@ -49,6 +55,13 @@ class TTSStreamRequestParameters(BaseModel):
     audio_format: str = Field(description="合成音频格式", default="wav")
     sample_rate: int = Field(description="合成音频采样率", default=24000)
     instruct_text: Union[str | None] = Field(description="指令文本", default=None)
+    slice_seconds: float = Field(description="最大输出切片长度", default=1.0)
+    # generation related
+    flow_window_size: int = Field(description="Flow 模型生成滑动窗口大小", default=500)
+    flow_window_shift: int = Field(description="Flow 模型生成滑动窗口步长", default=50)
+    llm_keep_orig_prompt: bool = Field(description="LLM 模型生成保留参考提示", default=True)
+    llm_min_cached_count: int = Field(description="LLM 模型生成最小缓存数量", default=1)
+    llm_max_cached_length: int = Field(description="LLM 模型生成最大缓存长度", default=512)
 
 
 class TTSStreamRequestInput(BaseModel):
@@ -65,8 +78,6 @@ class TTSStreamOutput(BaseModel):
     error: bool = Field(description="是否发生错误", default=False)
     is_end: bool = Field(description="合成流是否结束", default=False)
     index: int = Field(description="输出流索引", default=0)
-    data: Union[str | None] = Field(
-        description="流式合成音频的 base64 数据", default=None
-    )
+    data: Union[str | None] = Field(description="流式合成音频的 base64 数据", default=None)
     audio_format: Union[str | None] = Field(description="合成音频格式", default=None)
     sample_rate: Union[int | None] = Field(description="合成音频采样率", default=None)

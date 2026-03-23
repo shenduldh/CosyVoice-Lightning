@@ -1,0 +1,4 @@
+-r common.txt
+
+vllm==0.10.1.1
+flashinfer-python==0.2.11

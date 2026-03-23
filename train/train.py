@@ -26,7 +26,7 @@ def set_logger(saved_dir):
             os.makedirs(saved_dir)
         logger_format = "<green>{time:YYYY-MM-DD HH:mm:ss}</green> | <level>{level}</level> | <cyan>{name}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> - <level>{message}</level>"
         logger.add(
-            os.path.join(saved_dir, "training_log.txt"),
+            os.path.join(saved_dir, "training.log"),
             format=logger_format,
             level="INFO",
         )
@@ -184,7 +184,7 @@ def load_dataloaders(
     return train_dataloader, dev_dataloader
 
 
-def eval(model, dev_dataloader, eval_hifigan):
+def eval_func(model, dev_dataloader, eval_hifigan):
     dist.barrier()
     cuda_id = int(os.environ.get("LOCAL_RANK", 0))
     device = torch.device(f"cuda:{cuda_id}")
@@ -295,7 +295,8 @@ def main(
     )
 
     # save model once before training
-    save_model(model, training_config, saved_dir, "init")
+    model_saved_dir = os.path.join(saved_dir, "checkpoints")
+    save_model(model, training_config, model_saved_dir, "init")
 
     scaler = torch.amp.GradScaler() if use_amp and not use_deepspeed else None
     for epoch in range(init_epoch, num_epochs):
@@ -316,16 +317,17 @@ def main(
             dpo_loss=dpo_loss,
             scaler=scaler,
             training_config=training_config,
+            eval_func=eval_func,
             eval_steps=eval_steps,
-            saved_dir=saved_dir,
+            saved_dir=model_saved_dir,
         )
 
         # eval when an epoch ends
-        loss_dict = eval(model, dev_dataloader, training_config["train_hifigan"])
+        loss_dict = eval_func(model, dev_dataloader, training_config["train_hifigan"])
         logger.info(f"Epoch End -- loss_dict: {loss_dict}")
 
         # save model when an epoch ends
-        save_model(model, training_config, saved_dir, "epochend")
+        save_model(model, training_config, model_saved_dir, "epochend", loss_dict)
 
     dist.destroy_process_group()
 

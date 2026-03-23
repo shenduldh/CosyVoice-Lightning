@@ -14,6 +14,8 @@ from contextlib import nullcontext
 import datetime
 from loguru import logger
 from tqdm import tqdm
+import re
+import json
 
 from cosyvoice.utils.scheduler import WarmupLR, NoamHoldAnnealing, ConstantLR
 
@@ -99,16 +101,21 @@ def load_optimizer_and_scheduler(model, training_config):
     return model, optimizer, scheduler, optimizer_disc, scheduler_disc
 
 
-def save_model(model, training_config, saved_dir, prefix):
+def save_model(model, training_config, saved_dir, prefix, info_dict=None):
     if int(os.environ.get("RANK", 0)) == 0:
         if not os.path.exists(saved_dir):
             os.makedirs(saved_dir)
         epoch = training_config["epoch"]
         step = training_config["step"]
+        saved_path = os.path.join(saved_dir, f"{prefix}_{epoch}_{step}.pt")
         torch.save(
-            {**model.module.state_dict(), "epoch": epoch, "step": step},
-            os.path.join(saved_dir, f"{prefix}_{epoch}_{step}.pt"),
+            {**model.module.state_dict(), "epoch": epoch, "step": step}, saved_path
         )
+
+        if info_dict is not None:
+            saved_path = re.sub(".pt$", ".json", saved_path)
+            with open(saved_path, "w", encoding="utf-8") as f:
+                json.dump(info_dict, f, ensure_ascii=False)
 
 
 def forward(model, ref_model, batch, dpo_loss, scaler, dtype, device):
@@ -162,6 +169,7 @@ def train_one_epoch(
     dpo_loss,
     scaler,
     training_config,
+    eval_func,
     eval_steps,
     saved_dir=None,
     timeout=60,
@@ -225,9 +233,9 @@ def train_one_epoch(
                 and (training_config["step"] + 1) % eval_steps == 0
                 and (batch_idx + 1) % accum_grad_steps == 0
             ):
-                loss_dict = eval(model, dev_dataloader, train_hifigan)
+                loss_dict = eval_func(model, dev_dataloader, train_hifigan)
                 logger.info(f"Training -- loss_dict: {loss_dict}")
                 if saved_dir is not None:
-                    save_model(model, training_config, saved_dir, "training")
+                    save_model(model, training_config, saved_dir, "training", loss_dict)
 
     dist.destroy_process_group(dist_group)

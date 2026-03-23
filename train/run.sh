@@ -5,8 +5,8 @@
 #     --speech_tokenizer ../assets/CosyVoice2-0.5B/speech_tokenizer_v2.onnx \
 #     --audio_suffix .wav \
 #     --text_suffix .txt \
-#     --apply_dpo true \
-#     --reject_audio_suffix .reject.wav
+#     --reject_audio_suffix .reject.wav \
+#     --apply_dpo true
 
 CUDA_VISIBLE_DEVICES=0,1 torchrun --nnodes=1 --nproc-per-node=2 --master-port=12345 train.py \
       --deepspeed_config ./ds_config.json \

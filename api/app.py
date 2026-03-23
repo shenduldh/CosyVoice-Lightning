@@ -1,12 +1,4 @@
-import sys
 import asyncio
-import uvloop
-from utils import path_to_root
-from logger import logger
-
-sys.path.insert(0, path_to_root())
-asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
-
 import os
 import time
 import uuid
@@ -15,7 +7,6 @@ import traceback
 import requests
 import numpy as np
 from ruamel import yaml
-from typing import Union
 from datetime import datetime
 from tempfile import NamedTemporaryFile
 from dataclasses import dataclass, field
@@ -24,49 +15,51 @@ from starlette.responses import JSONResponse, StreamingResponse
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from io import BytesIO
 import soundfile
+from loguru import logger
 
 from bases import *
 from utils import *
-from debug import Debug, debug as debug_instance
-from tts_fast.pipeline import CosyVoice2Pipeline, CosyVoiceInputType
+from tts_fast.cosyvoice_fast.entry import CosyVoiceEntry
+from tts_fast.cosyvoice_fast.common import CosyVoiceInputType
 from seg2stream import (
     SegmentationManager,
     SegSent2GeneratorConfig,
     SegSent2StreamConfig,
 )
+from debug import Debugger
 
 
-class Global:
-    tts_model: Union[None | CosyVoice2Pipeline] = None
-    config: Union[None | dict] = None
-    seg_manager: Union[None | SegmentationManager] = None
+class MyApp(FastAPI):
+    tts_model: CosyVoiceEntry
+    config: dict
+    seg_manager: SegmentationManager
+    debugger: Debugger
     queues: dict[str, asyncio.Queue] = {}
-    debug: Debug = debug_instance
 
 
 @asynccontextmanager
-async def lifespan(app: FastAPI):
+async def lifespan(app: MyApp):
     # load config
     config_path = os.environ["CONFIG_PATH"]
     with open(config_path, "r", encoding="utf-8") as f:
-        Global.config = yaml.YAML().load(f)
-    logger.info(f"Successfully load config: {Global.config}")
+        app.config = yaml.YAML().load(f)
+    logger.info(f"Successfully load config: {app.config}")
 
     # load segmentation manager
-    match Global.config["segmentation"]["mode"]:
+    match app.config["segmentation"]["mode"]:
         case "bistream":
-            bi_cfg = Global.config["segmentation"]["bistream"]
+            bi_cfg = app.config["segmentation"]["bistream"]
             seg_config = SegSent2GeneratorConfig(
-                segmentation_suffix=Global.config["segmentation"]["seg_suffix"],
+                segmentation_suffix=app.config["segmentation"]["seg_suffix"],
                 max_waiting_time=bi_cfg["max_waiting_time"],
                 max_stream_time=bi_cfg["max_stream_time"],
                 first_min_seg_size=bi_cfg["first_min_seg_size"],
                 min_seg_size=bi_cfg["min_seg_size"],
             )
         case "unistream":
-            uni_cfg = Global.config["segmentation"]["unistream"]
+            uni_cfg = app.config["segmentation"]["unistream"]
             seg_config = SegSent2StreamConfig(
-                segmentation_suffix=Global.config["segmentation"]["seg_suffix"],
+                segmentation_suffix=app.config["segmentation"]["seg_suffix"],
                 first_max_accu_time=uni_cfg["first_max_accu_time"],
                 max_accu_time=uni_cfg["max_accu_time"],
                 first_max_buffer_size=uni_cfg["first_max_buffer_size"],
@@ -81,48 +74,47 @@ async def lifespan(app: FastAPI):
                 fade_in_out_time=uni_cfg["fade_in_out_time"],
                 seconds_per_word=uni_cfg["seconds_per_word"],
             )
-    Global.seg_manager = SegmentationManager(seg_config)
-    Global.seg_manager.start()
+    app.seg_manager = SegmentationManager(seg_config)
+    app.seg_manager.start()
 
     async def process_seg_output():
-        async for id, text in Global.seg_manager.get_async_output():
-            if id in Global.queues:
-                Global.queues[id].put_nowait(text)
-                logger.info(f"TTS Segment: id={id} text={text}")
+        async for id, text in app.seg_manager.get_async_output():
+            if id in app.queues:
                 if text is None:
-                    Global.queues.pop(id)
-                else:
-                    Global.debug.add_text(id, [text])
+                    app.queues[id].put_nowait(None)
+                    app.queues.pop(id)
+                elif len(text) > 0:
+                    logger.info(f"TTS Segment: {id=} {len(text)=} {text=}")
+                    app.queues[id].put_nowait(text)
+                    app.debugger.add_text(id, [text])
 
     seg_output_task = asyncio.create_task(process_seg_output())
 
     # load tts model
     tts_model_dir = os.environ["TTS_MODEL_DIR"]
-    Global.tts_model = CosyVoice2Pipeline(tts_model_dir)
+    app.tts_model = CosyVoiceEntry(tts_model_dir)
     logger.info("TTS model is loaded successfully.")
 
     # load voice cache
-    speaker_cache_path = os.getenv(
-        "DEFAULT_SPEAKER_CACHE_PATH", path_to_root("assets", "default_speaker_cache.pt")
-    )
+    speaker_cache_path = os.getenv("DEFAULT_SPEAKER_CACHE_PATH", path_to_root("assets", "default_speaker_cache.pt"))
     if os.path.exists(speaker_cache_path):
-        speaker_ids = Global.tts_model.load_cache(speaker_cache_path)
+        speaker_ids = app.tts_model.load_cache(speaker_cache_path)
         logger.info(f"Successfully load speakers: {speaker_ids}")
 
     # set debug
-    Global.debug.set_enabled(os.getenv("DEBUG", "0") == "1")
-    logger.info(f"Debug mode: {Global.debug.enabled}")
-    Global.debug.patch(app)
-    Global.debug.on_startup()
+    app.debugger = Debugger(enabled=bool(int(os.getenv("DEBUG", "0"))))
+    logger.info(f"Debug mode: {app.debugger.enabled}")
+    app.debugger.patch(app)
+    app.debugger.on_startup()
 
     yield
 
-    Global.seg_manager.close()
+    app.seg_manager.close()
     await seg_output_task
-    Global.debug.on_destroy()
+    app.debugger.on_destroy()
 
 
-app = FastAPI(lifespan=lifespan)
+app = MyApp(lifespan=lifespan)
 
 
 @app.exception_handler(Exception)
@@ -143,26 +135,24 @@ async def alive() -> dict:
 
 @app.get("/speakers")
 async def get_speakers() -> list:
-    return Global.tts_model.get_speakers()
+    return app.tts_model.get_speakers()
 
 
 @app.post("/remove")
 async def remove_speakers(req: RemoveSpeakersInput) -> dict:
-    removed = Global.tts_model.remove_speakers(req.prompt_ids)
+    removed = app.tts_model.remove_speakers(req.prompt_ids)
     return {"removed_speakers": removed}
 
 
 @app.post("/cache/save")
 async def save_cache(req: SaveCacheInput) -> dict:
-    cache_path = Global.tts_model.save_cache(
-        req.cache_dir, req.filename, req.prompt_ids
-    )
+    cache_path = app.tts_model.save_cache(req.cache_dir, req.filename, req.prompt_ids)
     return {"cache_path": cache_path}
 
 
 @app.post("/cache/load")
 async def load_cache(req: LoadCacheInput) -> dict:
-    loaded_speaker_ids = Global.tts_model.load_cache(req.cache_path, req.prompt_ids)
+    loaded_speaker_ids = app.tts_model.load_cache(req.cache_path, req.prompt_ids)
     return {"loaded_speakers": loaded_speaker_ids}
 
 
@@ -179,38 +169,28 @@ async def clone(req: CloneInput) -> CloneOutput:
 
     if prompt_id is None:
         prompt_id = f"{uuid.uuid4().hex[:7]}_{datetime.now().strftime('%Y-%m-%d')}"
-    if prompt_id in Global.tts_model.get_speakers():
+    if prompt_id in app.tts_model.get_speakers():
         return CloneOutput(existed=True, prompt_id=prompt_id)
 
     if len(prompt_text.strip()) == 0:
         prompt_text = None
 
     s = time.time()
-    test_text = "这是一段测试文本。"
 
     if os.path.exists(prompt_audio):
-        async for _ in Global.tts_model.async_generate(
-            None, test_text, prompt_text, prompt_audio, None, prompt_id, loudness
-        ):
-            pass
+        app.tts_model.async_request(None, prompt_audio, prompt_text, None, prompt_id, loudness)
     elif prompt_audio.startswith("http"):
         prompt_audio = requests.get(prompt_audio).content
         with NamedTemporaryFile() as f:
             f.write(prompt_audio)
             f.flush()
-            async for _ in Global.tts_model.async_generate(
-                None, test_text, prompt_text, f.name, None, prompt_id, loudness
-            ):
-                pass
+            app.tts_model.async_request(None, f.name, prompt_text, None, prompt_id, loudness)
     else:
         prompt_audio = any_format_to_ndarray(prompt_audio, audio_format, sample_rate)
         with NamedTemporaryFile(suffix=".wav") as f:
             save_audio(prompt_audio, f.name, 16000)
             f.flush()
-            async for _ in Global.tts_model.async_generate(
-                None, test_text, prompt_text, f.name, None, prompt_id, loudness
-            ):
-                pass
+            app.tts_model.async_request(None, f.name, prompt_text, None, prompt_id, loudness)
 
     e = time.time()
     logger.info(f"Clone time: {e - s}")
@@ -219,21 +199,32 @@ async def clone(req: CloneInput) -> CloneOutput:
 
 
 @app.post("/tts")
-async def tts(req: TTSInput) -> TTSOutput:
+async def tts(req: TTSInput):
     logger.info("Request Params: %s" % req)
 
     prompt_id = req.prompt_id
     instruct_text = req.instruct_text
 
-    if prompt_id not in Global.tts_model.get_speakers():
+    if prompt_id not in app.tts_model.get_speakers():
         return JSONResponse("No such speaker.", http.HTTPStatus.NOT_FOUND)
 
     if instruct_text is not None and len(instruct_text) == 0:
         instruct_text = None
 
     audio_ndarray = []
-    async for chunk in Global.tts_model.async_generate(
-        None, req.text, None, None, instruct_text, prompt_id, split_text=True
+    async for chunk in app.tts_model.async_request(
+        req.text,
+        None,
+        None,
+        instruct_text,
+        prompt_id,
+        split_text=True,
+        stream=True,
+        flow_window_size=req.flow_window_size,
+        flow_window_shift=req.flow_window_size,
+        llm_keep_orig_prompt=req.llm_keep_orig_prompt,
+        llm_min_cached_count=req.llm_min_cached_count,
+        llm_max_cached_length=req.llm_max_cached_length,
     ):
         audio_ndarray.append(chunk)
     audio_ndarray = np.concatenate(audio_ndarray)
@@ -242,16 +233,14 @@ async def tts(req: TTSInput) -> TTSOutput:
         return TTSOutput(
             audio=format_ndarray_to_base64(
                 audio_ndarray,
-                Global.tts_model.sample_rate,
+                app.tts_model.sample_rate,
                 req.sample_rate,
                 req.audio_format,
             )
         )
     else:
         buffer = BytesIO()
-        soundfile.write(
-            buffer, audio_ndarray, format="wav", samplerate=Global.tts_model.sample_rate
-        )
+        soundfile.write(buffer, audio_ndarray, format="wav", samplerate=app.tts_model.sample_rate)
         return StreamingResponse(
             buffer,
             media_type="audio/wav",
@@ -260,118 +249,134 @@ async def tts(req: TTSInput) -> TTSOutput:
 
 
 @dataclass
-class TTSInfo:
-    request: TTSStreamRequestParameters
+class TTSTask:
+    params: TTSStreamRequestParameters
     id: str = field(default_factory=lambda: uuid.uuid4().hex)
     date: datetime = field(default_factory=datetime.now)
-    count: int = 0
+    counter: int = 0
     queue: asyncio.Queue = field(default_factory=asyncio.Queue)
 
 
-async def tts_job(tts_info: TTSInfo, websocket: WebSocket):
+async def run_task(tts_task: TTSTask, websocket: WebSocket):
+    # from pyinstrument import Profiler
+    # profiler = Profiler(interval=0.0001, async_mode="enabled", use_timing_thread=True)
+    # profiler.start()
+
+    # from torch.profiler import profile, ProfilerActivity
+    # with profile(
+    #     activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
+    #     record_shapes=True,
+    #     profile_memory=True,
+    #     with_stack=True,
+    # ) as prof:
+
     try:
-        output_stream = Global.tts_model.async_generate(
-            tts_info.id,
-            tts_info.queue,
+        output_stream = app.tts_model.async_request(
+            tts_task.queue,
             None,
             None,
-            tts_info.request.instruct_text,
-            tts_info.request.prompt_id,
+            tts_task.params.instruct_text,
+            tts_task.params.prompt_id,
             stream=True,
+            flow_window_size=tts_task.params.flow_window_size,
+            flow_window_shift=tts_task.params.flow_window_size,
+            llm_keep_orig_prompt=tts_task.params.llm_keep_orig_prompt,
+            llm_min_cached_count=tts_task.params.llm_min_cached_count,
+            llm_max_cached_length=tts_task.params.llm_max_cached_length,
             input_type=CosyVoiceInputType.QUEUE,
         )
-        min_repacking_size = Global.tts_model.sample_rate * 0.01
+        repacking_size = int(app.tts_model.sample_rate * tts_task.params.slice_seconds)
+        capacity = int(app.tts_model.sample_rate * 10)
+        repacked_stream = async_repack(output_stream, repacking_size, repacking_size, capacity)
 
-        async for chunk_ndarray in async_repack(output_stream, min_repacking_size):
-            if Global.config["tts"]["do_removing_silence"]:
+        async for chunk_ndarray in repacked_stream:
+            if app.config["tts"]["do_removing_silence"]:
                 chunk_ndarray = remove_silence(
                     chunk_ndarray,
-                    Global.tts_model.sample_rate,
+                    app.tts_model.sample_rate,
                     (
-                        Global.config["tts"]["first_left_retention_seconds"]
-                        if tts_info.count == 0
-                        else Global.config["tts"]["left_retention_seconds"]
+                        app.config["tts"]["first_left_retention_seconds"]
+                        if tts_task.counter == 0
+                        else app.config["tts"]["left_retention_seconds"]
                     ),
-                    Global.config["tts"]["right_retention_seconds"],
+                    app.config["tts"]["right_retention_seconds"],
                 )
             chunk_base64 = format_ndarray_to_base64(
                 chunk_ndarray,
-                Global.tts_model.sample_rate,
-                tts_info.request.sample_rate,
-                tts_info.request.audio_format,
+                app.tts_model.sample_rate,
+                tts_task.params.sample_rate,
+                tts_task.params.audio_format,
             )
             await websocket.send_json(
                 TTSStreamOutput(
-                    id=tts_info.id,
+                    id=tts_task.id,
                     is_end=False,
-                    index=tts_info.count,
+                    index=tts_task.counter,
                     data=chunk_base64,
-                    audio_format=tts_info.request.audio_format,
-                    sample_rate=tts_info.request.sample_rate,
+                    audio_format=tts_task.params.audio_format,
+                    sample_rate=tts_task.params.sample_rate,
                 ).model_dump()
             )
-            tts_info.count += 1
-            Global.debug.add_chunk(tts_info.id, chunk_ndarray)
+            tts_task.counter += 1
+            app.debugger.add_chunk(tts_task.id, chunk_ndarray)
 
-        await websocket.send_json(
-            TTSStreamOutput(
-                id=tts_info.id, is_end=True, index=tts_info.count
-            ).model_dump()
-        )
-        Global.debug.save(tts_info.id, tts_info, Global.tts_model.sample_rate)
+        await websocket.send_json(TTSStreamOutput(id=tts_task.id, is_end=True, index=tts_task.counter).model_dump())
+        app.debugger.save(tts_task.id, tts_task, app.tts_model.sample_rate)
     except BaseException as e:
         asyncio.create_task(output_stream.athrow(StopAsyncIteration))
         if not isinstance(e, asyncio.CancelledError):
             raise
+
+    # prof.export_chrome_trace("torch_profile.json")
+    # profiler.stop()
+    # profiler.print()
+    # with open("profile.html", "w") as f:
+    #     f.write(profiler.output_html())
 
 
 @app.websocket("/tts")
 async def tts(websocket: WebSocket):
     await websocket.accept()
 
-    tts_info = None
-    running_job = None
+    curr_task = None
+    running_task = None
 
     while True:
         try:
             req = await websocket.receive_json()
-            if running_job is None:
+            if running_task is None:
                 req = TTSStreamRequestInput(**req)
                 req_params = req.req_params
-                if req_params.prompt_id not in Global.tts_model.get_speakers():
+                if req_params.prompt_id not in app.tts_model.get_speakers():
                     raise ValueError("No such speaker.")
-                if (
-                    req_params.instruct_text is not None
-                    and len(req_params.instruct_text) == 0
-                ):
+                if req_params.instruct_text is not None and len(req_params.instruct_text) == 0:
                     req_params.instruct_text = None
 
-                tts_info = TTSInfo(request=req_params)
-                logger.info(f"TTS Request: {tts_info}")
-                Global.queues[tts_info.id] = tts_info.queue
-                running_job = asyncio.create_task(tts_job(tts_info, websocket))
+                curr_task = TTSTask(params=req_params)
+                logger.info(f"TTS Request: {curr_task}")
+                app.queues[curr_task.id] = curr_task.queue
+                running_task = asyncio.create_task(run_task(curr_task, websocket))
             else:
                 req = TTSStreamTextInput(**req)
-                logger.info("TTS Stream: %s" % req)
-                if len(req.text) > 0:
-                    Global.seg_manager.add_text(tts_info.id, req.text)
+                logger.info(f"TTS Stream: {req}")
+                app.seg_manager.add_text(curr_task.id, req.text)
                 if req.done:
-                    Global.seg_manager.add_text(tts_info.id, None)
-                    await running_job
-                    tts_info = None
-                    running_job = None
+                    app.seg_manager.add_text(curr_task.id, None)
+                    await running_task
+                    curr_task = None
+                    running_task = None
 
         except BaseException as e:
-            if tts_info is not None:
-                if tts_info.id in Global.queues:
-                    Global.seg_manager.add_text(tts_info.id, None)
-                tts_info = None
-            if running_job is not None:
-                if not running_job.done():
-                    running_job.cancel()
-                    await running_job
-                running_job = None
+            if curr_task is not None:
+                if curr_task.id in app.queues:
+                    app.seg_manager.add_text(curr_task.id, None)
+                curr_task = None
+            if running_task is not None:
+                if not running_task.done():
+                    running_task.cancel()
+                    await running_task
+                running_task = None
             if isinstance(e, WebSocketDisconnect):
                 break
-            logger.error(f"Error in websocket: {traceback.format_exc()}")
+            logger.error(f"Error in websocket:\n{traceback.format_exc()}")
             await websocket.send_json({"error": True, "message": whats_wrong_with(e)})

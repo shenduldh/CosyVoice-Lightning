@@ -1,26 +1,26 @@
 # 接口说明
 
 
-## 查看已克隆音色 ID
+#### 查看已克隆音色 ID
 
-地址：`GET http://0.0.0.0:12244/speakers`
+地址：`GET http(s)://ip:port/speakers`
 
 响应：`["example_speaker_id1", "example_speaker_id2", ...]`
 
 
-## 删除已克隆音色
+#### 删除已克隆音色
 
-地址：`POST http://0.0.0.0:12244/remove`
+地址：`POST http(s)://ip:port/remove`
 
 参数：`{"prompt_ids": ["example_speaker_id1", "example_speaker_id2", ...]}`
 
 响应：`{"removed_speakers": ["example_speaker_id1", "example_speaker_id2", ...]}`
 
 
-## 持久化保存已克隆音色
+#### 持久化保存已克隆音色
 
 
-地址：`POST http://0.0.0.0:12244/cache/save`
+地址：`POST http(s)://ip:port/cache/save`
 
 参数：
 
@@ -35,19 +35,19 @@
 响应：`{"cache_path": "path used to save tone cache"}`
 
 
-## 加载音色
+#### 加载音色
 
 
-地址：`POST http://0.0.0.0:12244/cache/load`
+地址：`POST http(s)://ip:port/cache/load`
 
 参数：`{"cache_path": "tone cache path", "prompt_ids": ["example_speaker_id1", "example_speaker_id2", ...]}`
 
 响应：`{"loaded_speakers": ["example_speaker_id1", "example_speaker_id2", ...]}`
 
 
-## 克隆音色
+#### 克隆音色
 
-地址：`POST http://0.0.0.0:12244/clone`
+地址：`POST http(s)://ip:port/clone`
 
 参数：
 
@@ -65,9 +65,9 @@
 响应：`{"existed": False, "prompt_id": "example_speaker_id"}`
 
 
-## 流式 TTS
+#### 流式 TTS
 
-地址：`WEBSOCKET ws://0.0.0.0:12244/tts`
+地址：`WEBSOCKET ws(s)://ip:port/tts`
 
 参数：
 
@@ -79,7 +79,8 @@
             "prompt_id": "example_speaker_id",
             "audio_format": "opus, pcm, wav, mp3, flac, aac, m4a, or wav, default wav",
             "sample_rate": 24000,
-            "instruct_text": "text or null"
+            "instruct_text": "text or null",
+            "slice_seconds": 1.0
         }
     }
     ```

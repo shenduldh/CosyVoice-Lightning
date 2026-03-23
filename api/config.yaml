@@ -1,3 +1,5 @@
+## `config.yaml` file is used to set up initialized arguments
+
 segmentation:
   seg_suffix: "####"
   mode: "unistream"

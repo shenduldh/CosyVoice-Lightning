@@ -9,6 +9,7 @@ import deepspeed
 from deepspeed.runtime.zero.stage_1_and_2 import (
     estimate_zero2_model_states_mem_needs_all_live,
 )
+import json
 
 from cosyvoice.utils.scheduler import WarmupLR, NoamHoldAnnealing, ConstantLR
 
@@ -56,15 +57,21 @@ def load_optimizer_and_scheduler(model, training_config):
     return model, optimizer, scheduler, None, None
 
 
-def save_model(model, training_config, saved_dir, prefix):
+def save_model(model, training_config, saved_dir, prefix, info_dict=None):
     with torch.no_grad():
         epoch = training_config["epoch"]
         step = training_config["step"]
+        saved_name = f"{prefix}_{epoch}_{step}"
         model.save_checkpoint(
             save_dir=saved_dir,
-            tag=f"{prefix}_{epoch}_{step}",
+            tag=saved_name,
             client_state={"epoch": epoch, "step": step},
         )
+
+        if int(os.environ.get("RANK", 0)) == 0 and info_dict is not None:
+            saved_path = os.path.join(saved_dir, f"{saved_name}.json")
+            with open(saved_path, "w", encoding="utf-8") as f:
+                json.dump(info_dict, f, ensure_ascii=False)
 
 
 def forward(model, ref_model, batch, dpo_loss, dtype, device):
@@ -100,6 +107,7 @@ def train_one_epoch(
     scheduler,
     dpo_loss,
     training_config,
+    eval_func,
     eval_steps,
     saved_dir=None,
     timeout=60,
@@ -138,9 +146,9 @@ def train_one_epoch(
         if training_config["step"] < scheduler.last_epoch:
             training_config["step"] = scheduler.last_epoch
             if eval_steps > 0 and (training_config["step"] + 1) % eval_steps == 0:
-                loss_dict = eval(model, dev_dataloader)
+                loss_dict = eval_func(model, dev_dataloader)
                 logger.info(f"Training -- loss_dict: {loss_dict}")
                 if saved_dir is not None:
-                    save_model(model, training_config, saved_dir, "training")
+                    save_model(model, training_config, saved_dir, "training", loss_dict)
 
     dist.destroy_process_group(dist_group)

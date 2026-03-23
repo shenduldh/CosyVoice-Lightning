@@ -1,7 +1,7 @@
 __pycache__
 logs
 results
-examples
-assets/cache
 api/debug/saved
 api/debug/temp
+api/*.test*
+assets/compilation_cache

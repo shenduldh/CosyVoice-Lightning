@@ -103,10 +103,16 @@ async def request_tts(text, prompt_id, task_id, saved_dir):
             message = await websocket.recv(False)
             message = json.loads(message)
 
-            if message["error"]:
-                print(f"{task_id:02} ERROR:", message)
+            if message["error"] or message["is_end"]:
+                if message["error"]:
+                    print(f"{task_id:02} ERROR:", message)
 
-            elif not message["is_end"]:
+                whole_seconds = time.perf_counter() - whole_start
+                all_recv_seconds.append(whole_seconds)
+                print(f"{task_id:02} ALL RECV:", whole_seconds)
+                break
+
+            else:
                 frame_seconds = time.perf_counter() - frame_start
                 all_recv_seconds.append(frame_seconds)
                 print(f"{task_id:02}-{message['index']:02} FRAME RECV:", frame_seconds)
@@ -127,12 +133,6 @@ async def request_tts(text, prompt_id, task_id, saved_dir):
                         resample_rate,
                     )
 
-            elif message["is_end"]:
-                whole_seconds = time.perf_counter() - whole_start
-                all_recv_seconds.append(whole_seconds)
-                print(f"{task_id:02} ALL RECV:", whole_seconds)
-                break
-
         if SAVE_GENERATED_AUDIO:
             save_audio(np.concatenate(whole_audio), f"{root}/whole.mp3", resample_rate)
 
@@ -147,7 +147,7 @@ def test_mttff(num_requests=1, test_times=4, saved_root="./results"):
     print(f"========== TEST TTFF -- {num_requests} REQUESTS  ==========")
     saved_dir = os.path.join(
         saved_root,
-        "speeches",
+        "audios",
         f"{str(time.time()).split('.')[0]}_{uuid.uuid4().hex[:7]}",
     )
 

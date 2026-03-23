@@ -31,7 +31,9 @@
                             <n-input type="text" v-model:value="cloneParams.id" clearable />
                         </n-form-item>
                         <n-form-item label="音量大小">
-                            <n-input-number v-model:value="cloneParams.loudness" />
+                            <n-input-number v-model:value="cloneParams.loudness">
+                                <template #suffix>db (LKFS)</template>
+                            </n-input-number>
                         </n-form-item>
                         <n-form-item label="参考文本">
                             <n-input type="textarea" v-model:value="cloneParams.text" clearable />
@@ -79,6 +81,9 @@
                         </n-form-item>
                         <n-form-item label="合成文本">
                             <n-input type="textarea" v-model:value="generateParams.text" clearable />
+                        </n-form-item>
+                        <n-form-item label="指令文本">
+                            <n-input type="textarea" v-model:value="generateParams.instruct" clearable />
                         </n-form-item>
                         <n-form-item label=" ">
                             <n-button type="success" @click="generate" :loading="generateLoading">合成</n-button>
@@ -141,7 +146,7 @@
                 const downloaderRef = ref(undefined)
                 const cloneParams = reactive({ id: "", text: "", audio: [], loudness: 30 })
                 const promptIDs = ref([])
-                const generateParams = reactive({ id: null, text: "" })
+                const generateParams = reactive({ id: null, text: "", instruct: "" })
                 const deleteIDs = ref([])
                 const cloneLoading = ref(false)
                 const generateLoading = ref(false)
@@ -278,7 +283,7 @@
                 }
 
                 const generate = () => {
-                    const { id, text } = generateParams
+                    const { id, text, instruct } = generateParams
                     if (id == null || id.length == 0 || text.length == 0) {
                         message.error("请补充合成参数")
                         return
@@ -289,14 +294,26 @@
                     let audioData = ""
                     const ws = new WebSocket(`${location.protocol.startsWith("https") ? "wss:" : "ws:"}//${location.host}/tts`)
                     ws.onopen = () => {
-                        ws.send(JSON.stringify({ req_params: { prompt_id: id, audio_format: "pcm", sample_rate: 24000, instruct_text: null } }))
+                        ws.send(JSON.stringify({
+                            req_params: {
+                                prompt_id: id, audio_format: "pcm", sample_rate: 24000,
+                                instruct_text: instruct.length > 0 ? instruct : null,
+                                slice_seconds: 1.0,
+                                flow_window_size: 500,
+                                flow_window_shift: 50,
+                                llm_keep_orig_prompt: true,
+                                llm_min_cached_count: 1,
+                                llm_max_cached_length: 512,
+                            }
+                        }))
                         ws.send(JSON.stringify({ "text": text, "done": true }))
                     }
                     ws.onmessage = async e => {
                         const msg = JSON.parse(e.data)
                         console.log(msg)
                         if (msg.data && msg.data.length > 0) audioData += msg.data
-                        if (msg.is_end) {
+                        if (msg.error) message.error(`合成存在错误: ${msg.message}`)
+                        if (msg.is_end || msg.error) {
                             ws.close()
                             let arrayBuffer = Uint8Array.from(atob(audioData), c => c.charCodeAt(0)).buffer
                             arrayBuffer = int16ArrayBufferToWav(arrayBuffer, 24000, 16, 1)
