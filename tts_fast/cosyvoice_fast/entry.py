@@ -10,7 +10,7 @@ import threading
 
 from .pipeline import CosyVoicePipeline
 from .frontend import CosyVoiceFrontEnd
-from .common import VERSION, CosyVoiceInputType, Prompt, Params
+from .common import VERSION, TTS_MODEL_DIR, CosyVoiceInputType, Prompt, Params
 
 
 def async_to_sync_gen(async_generator: AsyncGenerator):
@@ -50,10 +50,10 @@ def tensor_to_list(t: torch.Tensor):
 
 
 class CosyVoiceEntry:
-    def __init__(self, model_dir):
-        self.synthesizer = CosyVoicePipeline(model_dir)
+    def __init__(self):
+        self.synthesizer = CosyVoicePipeline(TTS_MODEL_DIR)
         self.sample_rate = self.synthesizer.sample_rate
-        self.frontend = CosyVoiceFrontEnd(model_dir)
+        self.frontend = CosyVoiceFrontEnd(TTS_MODEL_DIR)
         self.speaker_cache = OrderedDict()
         self.set_decoration()
 
@@ -229,28 +229,15 @@ class CosyVoiceEntry:
         speaker_id: Optional[str] = None,
         loudness=30.0,
         split_text=False,
-        speed=1.0,
         stream=True,
-        flow_window_size=500,
-        flow_window_shift=50,
-        llm_keep_orig_prompt=True,
-        llm_min_cached_count=1,
-        llm_max_cached_length=512,
+        generation_params: dict = {},
         input_type=CosyVoiceInputType.SINGLE,
     ):
         prompt = self.prepare_prompt(prompt_audio, prompt_text, instruct_text, speaker_id, loudness)
         if tts_text is None:
             return
 
-        params = Params(
-            speed,
-            stream,
-            flow_window_size,
-            flow_window_shift,
-            llm_keep_orig_prompt,
-            llm_min_cached_count,
-            llm_max_cached_length,
-        )
+        params = Params(stream, **generation_params)
         input_generator = self.wrap_to_generator(tts_text, split_text, input_type)
         output_generator = self.synthesizer.generate(input_generator=input_generator, prompt=prompt, params=params)
         return output_generator

@@ -1,5 +1,5 @@
 from pydantic import BaseModel, Field
-from typing import List, Union
+from typing import List, Union, Optional
 
 
 class RemoveSpeakersInput(BaseModel):
@@ -31,6 +31,16 @@ class CloneOutput(BaseModel):
     prompt_id: str = Field(description="参考音频 ID")
 
 
+class GenerationParams(BaseModel):
+    flow_window_size: Optional[int] = Field(None, description="Flow 模型生成滑动窗口大小")
+    flow_window_shift: Optional[int] = Field(None, description="Flow 模型生成滑动窗口步长")
+    llm_keep_orig_prompt: Optional[bool] = Field(None, description="LLM 模型生成保留参考提示")
+    llm_min_cached_count: Optional[int] = Field(None, description="LLM 模型最小前缀缓存数量")
+    llm_min_text_cached_length: Optional[int] = Field(None, description="LLM 模型最小文本前缀缓存长度")
+    llm_min_speech_cached_length: Optional[int] = Field(None, description="LLM 模型最小语音前缀缓存长度")
+    llm_max_cached_length: Optional[int] = Field(None, description="LLM 模型最大前缀缓存长度")
+
+
 class TTSInput(BaseModel):
     text: str = Field(description="生成语音的文本")
     prompt_id: str = Field(description="参考音频 ID")
@@ -38,12 +48,7 @@ class TTSInput(BaseModel):
     sample_rate: int = Field(description="合成音频采样率", default=24000)
     instruct_text: Union[str | None] = Field(description="指令文本", default=None)
     return_base64: bool = Field(description="返回 base64", default=True)
-    # generation related
-    flow_window_size: int = Field(description="Flow 模型生成滑动窗口大小", default=500)
-    flow_window_shift: int = Field(description="Flow 模型生成滑动窗口步长", default=50)
-    llm_keep_orig_prompt: bool = Field(description="LLM 模型生成保留参考提示", default=True)
-    llm_min_cached_count: int = Field(description="LLM 模型生成最小缓存数量", default=1)
-    llm_max_cached_length: int = Field(description="LLM 模型生成最大缓存长度", default=512)
+    generation_params: GenerationParams = Field(description="生成配置", default_factory=GenerationParams)
 
 
 class TTSOutput(BaseModel):
@@ -56,12 +61,7 @@ class TTSStreamRequestParameters(BaseModel):
     sample_rate: int = Field(description="合成音频采样率", default=24000)
     instruct_text: Union[str | None] = Field(description="指令文本", default=None)
     slice_seconds: float = Field(description="最大输出切片长度", default=1.0)
-    # generation related
-    flow_window_size: int = Field(description="Flow 模型生成滑动窗口大小", default=500)
-    flow_window_shift: int = Field(description="Flow 模型生成滑动窗口步长", default=50)
-    llm_keep_orig_prompt: bool = Field(description="LLM 模型生成保留参考提示", default=True)
-    llm_min_cached_count: int = Field(description="LLM 模型生成最小缓存数量", default=1)
-    llm_max_cached_length: int = Field(description="LLM 模型生成最大缓存长度", default=512)
+    generation_params: GenerationParams = Field(description="生成配置", default_factory=GenerationParams)
 
 
 class TTSStreamRequestInput(BaseModel):

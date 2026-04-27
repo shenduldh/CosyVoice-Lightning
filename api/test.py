@@ -11,11 +11,18 @@ import random
 import matplotlib.pyplot as plt
 
 
-BASE_URL = "localhost:12244"
+BASE_URL = "127.0.0.1:12244"
+
+SAVE_GENERATED_AUDIO = False  ## control whether to save generated audios
+WHETHER_TO_TEST_MTTFF = True  ## control whether to test mttff metric
+
 SAVED_ROOT = "./results"
-SAVE_GENERATED_AUDIO = True  ## control whether to save generated audios
-WHETHER_TO_TEST_MTTFF = False  ## control whether to test mttff metric
-TEXTS = [
+WARMUP_MAX_NUM_REQUESTS = 1
+WARMUP_TIMES = 1
+MAX_NUM_REQUESTS = 20
+TEST_TIMES = 1
+
+DOCUMENTS = [
     # """《404病房》
     # 护士站的值班表上并没有404号病房。但凌晨三点，我分明听见走廊尽头传来规律的滴水声。
     # 白大褂被冷汗浸透时，我握着手电推开了那扇漆皮剥落的铁门。
@@ -70,33 +77,40 @@ async def random_segment_text(text, max_len=10):
 
 
 async def request_tts(text, prompt_id, task_id, saved_dir):
-    async with connect(f"ws://{BASE_URL}/tts") as websocket:
+    sample_rate = 24000
+
+    async with connect(
+        f"ws://{BASE_URL}/tts",
+        open_timeout=120,
+        ping_timeout=120,
+        close_timeout=120,
+    ) as websocket:
         # send a request
         await websocket.send(
             json.dumps(
                 {
                     "req_params": {
                         "prompt_id": prompt_id,
-                        "audio_format": "mp3",
-                        "sample_rate": 24000,
+                        "audio_format": "wav",
+                        "sample_rate": sample_rate,
                         "instruct_text": None,
+                        # "slice_seconds": 0.1
                     }
                 }
             )
         )
 
-        async def send_text_stream():
+        async def text_sender():
             async for t in random_segment_text(text):
                 await websocket.send(json.dumps({"text": t, "done": False}))
                 await asyncio.sleep(1e-7)
             await websocket.send(json.dumps({"text": "", "done": True}))
 
-        asyncio.create_task(send_text_stream())
+        asyncio.create_task(text_sender())
 
         all_recv_seconds = []
         whole_audio = []
         root = None
-        resample_rate = 24000
         whole_start = time.perf_counter()
         while True:
             frame_start = time.perf_counter()
@@ -109,7 +123,7 @@ async def request_tts(text, prompt_id, task_id, saved_dir):
 
                 whole_seconds = time.perf_counter() - whole_start
                 all_recv_seconds.append(whole_seconds)
-                print(f"{task_id:02} ALL RECV:", whole_seconds)
+                print(f"{task_id:02} TOTAL RECV:", whole_seconds)
                 break
 
             else:
@@ -117,61 +131,62 @@ async def request_tts(text, prompt_id, task_id, saved_dir):
                 all_recv_seconds.append(frame_seconds)
                 print(f"{task_id:02}-{message['index']:02} FRAME RECV:", frame_seconds)
 
+                chunk = any_format_to_ndarray(message["data"], message["audio_format"], message["sample_rate"], sample_rate)
+                whole_audio.append(chunk)
                 if SAVE_GENERATED_AUDIO:
-                    chunk = any_format_to_ndarray(
-                        message["data"],
-                        message["audio_format"],
-                        message["sample_rate"],
-                        resample_rate,
-                    )
-                    whole_audio.append(chunk)
                     root = f"{saved_dir}/{task_id}_{prompt_id}_{message['id']}"
                     os.makedirs(f"{root}/chunks", exist_ok=True)
-                    save_audio(
-                        chunk,
-                        f"{root}/chunks/{message['index']}.mp3",
-                        resample_rate,
-                    )
+                    save_audio(chunk, f"{root}/chunks/{message['index']}.wav", sample_rate)
+
+        whole_audio = np.concatenate(whole_audio)
+        duration = len(whole_audio) / sample_rate
 
         if SAVE_GENERATED_AUDIO:
-            save_audio(np.concatenate(whole_audio), f"{root}/whole.mp3", resample_rate)
+            save_audio(whole_audio, f"{root}/whole.wav", sample_rate)
 
-        return all_recv_seconds[0]
+        return round(all_recv_seconds[0], 4), round(all_recv_seconds[-1] / duration, 4)
 
 
 def run_tts(*args):
     return asyncio.run(request_tts(*args))
 
 
-def test_mttff(num_requests=1, test_times=4, saved_root="./results"):
-    print(f"========== TEST TTFF -- {num_requests} REQUESTS  ==========")
+def eval(num_requests=1, test_times=4, saved_root="./results", verbose=True):
+    if verbose:
+        print(f"========== EVAL [{num_requests} REQUESTS]  ==========")
     saved_dir = os.path.join(
         saved_root,
         "audios",
         f"{str(time.time()).split('.')[0]}_{uuid.uuid4().hex[:7]}",
     )
 
-    mean_ttffs = []
+    ttffs = []
+    rtfs = []
     for i in range(test_times):
-        print(f"========== {i + 1}/{test_times} ==========")
+        if verbose:
+            print(f"========== {i + 1}/{test_times} ==========")
         tasks = []
         with ProcessPoolExecutor(max_workers=num_requests) as pool:
             for j in range(num_requests):
                 tasks.append(
                     pool.submit(
                         run_tts,
-                        random.choice(TEXTS),
+                        random.choice(DOCUMENTS),
                         random.choice(PROMPT_IDS),
                         i + j,
                         saved_dir,
                     )
                 )
-        mttff = sum([t.result() for t in tasks]) / len(tasks)
-        mean_ttffs.append(mttff)
+        for t in tasks:
+            ttff, rtf = t.result()
+            ttffs.append(ttff)
+            rtfs.append(rtf)
 
-    avg_mttff = sum(mean_ttffs) / len(mean_ttffs)
-    print("--> MEAN TTFT:", avg_mttff)
-    return avg_mttff
+    mean_ttff = sum(ttffs) / len(ttffs)
+    mean_rtf = sum(rtfs) / len(rtfs)
+    if verbose:
+        print(f"--> {mean_ttff=} {mean_rtf=}")
+    return mean_ttff, mean_rtf
 
 
 if __name__ == "__main__":
@@ -183,38 +198,48 @@ if __name__ == "__main__":
             PROMPT_IDS.remove(id)
 
     ## warm up inference
-    test_mttff(1, 1, SAVED_ROOT)
+    print("========== WARM UP ==========")
+    eval(WARMUP_MAX_NUM_REQUESTS, WARMUP_TIMES, SAVED_ROOT, verbose=False)
 
     if not WHETHER_TO_TEST_MTTFF:
         exit()
 
-    ## test mttff (mean time to first frame)
+    ## eval mttff (mean time to first frame) and rtf
     start = time.perf_counter()
     all_results = []
     try:
-        for i in range(1, 21):
-            all_results.append((i, test_mttff(i, 2, SAVED_ROOT)))
+        for i in range(1, MAX_NUM_REQUESTS + 1):
+            all_results.append((i, *eval(i, TEST_TIMES, SAVED_ROOT)))
     finally:
         test_time = time.perf_counter() - start
         print(f"========== TOTAL TEST TIME: {test_time} ==========")
 
         ## save result
         if len(all_results) > 0:
-            saved_dir = os.path.join(SAVED_ROOT, "mttff")
-            os.makedirs(saved_dir, exist_ok=True)
-            fig_path = os.path.join(
-                saved_dir,
-                f"{str(time.time()).split('.')[0]}_{uuid.uuid4().hex[:7]}.png",
-            )
+            xs = [i[0] for i in all_results]
+            ys_mttff = [i[1] for i in all_results]
+            ys_mrtf = [i[2] for i in all_results]
 
-            xs = [x for x, _ in all_results]
-            ys = [round(y, 2) for _, y in all_results]
-            plt.figure(figsize=(10, 6))
-            bar = plt.bar(xs, ys, align="center")
-            plt.xticks(xs)
-            plt.bar_label(bar)
-            plt.title(f"Mean TTFF (test time: {test_time:.2f}s)")
-            plt.xlabel("num_requests")
-            plt.ylabel("seconds")
+            saved_dir = os.path.join(SAVED_ROOT, "eval_results")
+            os.makedirs(saved_dir, exist_ok=True)
+            fig_path = os.path.join(saved_dir, f"{str(time.time()).split('.')[0]}_{uuid.uuid4().hex[:7]}.png")
+
+            fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 10))
+
+            bar1 = ax1.bar(xs, ys_mttff, align="center", color="skyblue")
+            ax1.set_xticks(xs)
+            ax1.bar_label(bar1)
+            ax1.set_title(f"Mean TTFF (test time: {test_time:.2f}s)")
+            ax1.set_xlabel("num_requests")
+            ax1.set_ylabel("seconds")
+
+            bar2 = ax2.bar(xs, ys_mrtf, align="center", color="salmon")
+            ax2.set_xticks(xs)
+            ax2.bar_label(bar2)
+            ax2.set_title("Mean RTF")
+            ax2.set_xlabel("num_requests")
+            ax2.set_ylabel("ratio")
+
+            plt.tight_layout()
             plt.savefig(fig_path)
             plt.close()

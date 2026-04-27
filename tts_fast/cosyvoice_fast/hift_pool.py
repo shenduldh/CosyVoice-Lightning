@@ -7,6 +7,7 @@ import traceback
 import asyncio
 import uuid
 import numpy as np
+import gc
 
 from .common import (
     Params,
@@ -39,6 +40,7 @@ class HiftActor:
         return True
 
     def clean(self):
+        gc.collect()
         torch.cuda.empty_cache()
 
     @ray.method(enable_task_events=False, num_returns=3)
@@ -222,7 +224,8 @@ class HiftPool:
                         break
                     expected_index += 1
                 else:
-                    await self.buffer[id].put((index, finalized, speech_pcm))
+                    await self.buffer[id].put((index, finalized, speech_pcm, None))
+                    await asyncio.sleep(0)
         finally:
             self.clean()
             await output_queue.put(None)

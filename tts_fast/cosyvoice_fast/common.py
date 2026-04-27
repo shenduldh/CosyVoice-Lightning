@@ -12,6 +12,8 @@ os.environ["RAY_ACCEL_ENV_VAR_OVERRIDE_ON_ZERO"] = "0"
 ROOT = Path(__file__).parents[2]
 # TTS 版本
 VERSION = os.getenv("VERSION", "cosyvoice2").lower()
+# TTS 模型路径
+TTS_MODEL_DIR = str(os.getenv("TTS_MODEL_DIR", ROOT / "assets" / "CosyVoice2-0.5B"))
 # 编译缓存路径
 COMPILATION_CACHE_DIR = str(os.getenv("COMPILATION_CACHE_DIR", ROOT / "assets" / "compilation_cache"))
 # 文本预处理前端模型
@@ -23,7 +25,10 @@ NOVASR_MODEL_PATH = str(os.getenv("NOVASR_MODEL_PATH", ROOT / "assets" / "novasr
 
 
 # 等待超时时间
-WAITING_TIMEOUT = float(os.getenv("WAITING_TIMEOUT", 30.0))
+WAITING_TIMEOUT = float(os.getenv("WAITING_TIMEOUT", 120.0))
+# 额外配置 ray 的可用显卡
+RAY_CUDA_VISIBLE_DEVICES = os.getenv("RAY_CUDA_VISIBLE_DEVICES", os.getenv("CUDA_VISIBLE_DEVICES", "0"))
+
 
 #######################
 #### Flow 相关配置 ####
@@ -87,10 +92,12 @@ class Prompt:
 
 @dataclass
 class Params:
-    speed: float
     stream: bool
-    flow_window_size: int
-    flow_window_shift: int
-    llm_keep_orig_prompt: bool
-    llm_min_cached_count: int
-    llm_max_cached_length: int
+    speed: float = 1.0
+    flow_window_size: int = 500
+    flow_window_shift: int = 50
+    llm_keep_orig_prompt: bool = True
+    llm_min_cached_count: int = 1
+    llm_min_text_cached_length: int = 1
+    llm_min_speech_cached_length: int = 1
+    llm_max_cached_length: int = 512

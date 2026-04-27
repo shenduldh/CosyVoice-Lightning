@@ -21,11 +21,7 @@ from bases import *
 from utils import *
 from tts_fast.cosyvoice_fast.entry import CosyVoiceEntry
 from tts_fast.cosyvoice_fast.common import CosyVoiceInputType
-from seg2stream import (
-    SegmentationManager,
-    SegSent2GeneratorConfig,
-    SegSent2StreamConfig,
-)
+from seg2stream import SegmentationManager, SegSent2GeneratorConfig, SegSent2StreamConfig, get_phrase_segmenter
 from debug import Debugger
 
 
@@ -74,7 +70,7 @@ async def lifespan(app: MyApp):
                 fade_in_out_time=uni_cfg["fade_in_out_time"],
                 seconds_per_word=uni_cfg["seconds_per_word"],
             )
-    app.seg_manager = SegmentationManager(seg_config)
+    app.seg_manager = SegmentationManager(seg_config, segmenters=[get_phrase_segmenter()])
     app.seg_manager.start()
 
     async def process_seg_output():
@@ -91,8 +87,7 @@ async def lifespan(app: MyApp):
     seg_output_task = asyncio.create_task(process_seg_output())
 
     # load tts model
-    tts_model_dir = os.environ["TTS_MODEL_DIR"]
-    app.tts_model = CosyVoiceEntry(tts_model_dir)
+    app.tts_model = CosyVoiceEntry()
     logger.info("TTS model is loaded successfully.")
 
     # load voice cache
@@ -220,11 +215,7 @@ async def tts(req: TTSInput):
         prompt_id,
         split_text=True,
         stream=True,
-        flow_window_size=req.flow_window_size,
-        flow_window_shift=req.flow_window_size,
-        llm_keep_orig_prompt=req.llm_keep_orig_prompt,
-        llm_min_cached_count=req.llm_min_cached_count,
-        llm_max_cached_length=req.llm_max_cached_length,
+        generation_params=req.generation_params.model_dump(exclude_unset=True),
     ):
         audio_ndarray.append(chunk)
     audio_ndarray = np.concatenate(audio_ndarray)
@@ -278,11 +269,7 @@ async def run_task(tts_task: TTSTask, websocket: WebSocket):
             tts_task.params.instruct_text,
             tts_task.params.prompt_id,
             stream=True,
-            flow_window_size=tts_task.params.flow_window_size,
-            flow_window_shift=tts_task.params.flow_window_size,
-            llm_keep_orig_prompt=tts_task.params.llm_keep_orig_prompt,
-            llm_min_cached_count=tts_task.params.llm_min_cached_count,
-            llm_max_cached_length=tts_task.params.llm_max_cached_length,
+            generation_params=tts_task.params.generation_params.model_dump(exclude_unset=True),
             input_type=CosyVoiceInputType.QUEUE,
         )
         repacking_size = int(app.tts_model.sample_rate * tts_task.params.slice_seconds)

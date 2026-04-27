@@ -9,7 +9,7 @@ import tts_fast, cosyvoice, matcha, stepaudio
 from .llm.wrapper import LLMWrapper
 from .flow_pool import FlowPool, FLOW_ACTOR_COUNT
 from .hift_pool import HiftPool, HIFT_ACTOR_COUNT
-from .common import VERSION, Prompt, Params, WAITING_TIMEOUT
+from .common import VERSION, Prompt, Params, WAITING_TIMEOUT, RAY_CUDA_VISIBLE_DEVICES
 
 
 class CosyVoicePipeline:
@@ -17,6 +17,7 @@ class CosyVoicePipeline:
         ray.init(
             num_cpus=FLOW_ACTOR_COUNT + HIFT_ACTOR_COUNT,
             runtime_env={
+                "env_vars": {"CUDA_VISIBLE_DEVICES": RAY_CUDA_VISIBLE_DEVICES},
                 "py_modules": [tts_fast, cosyvoice, matcha, stepaudio],
                 "excludes": ["__pycache__"],
             },

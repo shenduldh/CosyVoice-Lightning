@@ -3,6 +3,7 @@ import shutil
 from loguru import logger
 from typing import List, AsyncGenerator
 import asyncio
+from collections import deque
 
 from ..common import VERSION, LLM_ENGINE_MODE, Prompt, Params, LLM_MAX_NUM_SILENT_TOKENS
 
@@ -161,10 +162,14 @@ class LLMWrapper:
     async def run(self, input_generator: AsyncGenerator, output_queue: asyncio.Queue, prompt: Prompt, params: Params):
         keep_original_prompt = params.llm_keep_orig_prompt
         min_cached_count = params.llm_min_cached_count
+        min_text_cached_length = params.llm_min_text_cached_length
+        min_speech_cached_length = params.llm_min_speech_cached_length
         max_cached_length = params.llm_max_cached_length
 
-        cached_ptt_lens, cached_ptt = [], []
-        cached_pst_lens, cached_pst = [], []
+        cached_ptt_lens = deque()
+        cached_pst_lens = deque()
+        cached_ptt = []
+        cached_pst = []
         curr_generated = []
         curr_num_silent_tokens = 0
 
@@ -206,10 +211,13 @@ class LLMWrapper:
                 cached_pst += curr_generated
 
                 while (
-                    len(cached_ptt_lens) > min_cached_count and (sum(cached_ptt_lens) + sum(cached_pst_lens)) > max_cached_length
+                    len(cached_ptt_lens) > min_cached_count
+                    and sum(cached_ptt_lens) > min_text_cached_length
+                    and sum(cached_pst_lens) > min_speech_cached_length
+                    and (sum(cached_ptt_lens) + sum(cached_pst_lens)) > max_cached_length
                 ):
-                    dropped_ptt_len = cached_ptt_lens.pop(0)
-                    dropped_pst_len = cached_pst_lens.pop(0)
+                    dropped_ptt_len = cached_ptt_lens.popleft()
+                    dropped_pst_len = cached_pst_lens.popleft()
                     cached_ptt = cached_ptt[dropped_ptt_len:]
                     cached_pst = cached_pst[dropped_pst_len:]
         finally:

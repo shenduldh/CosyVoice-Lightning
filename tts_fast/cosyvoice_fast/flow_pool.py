@@ -7,6 +7,8 @@ from loguru import logger
 import traceback
 from ray.util import ActorPool
 from omegaconf import DictConfig
+import gc
+import numpy as np
 
 from .utils import (
     get_flow_decoder_estimator_input_shapes,
@@ -49,6 +51,7 @@ class FlowActor:
         return True
 
     def clean(self):
+        gc.collect()
         torch.cuda.empty_cache()
 
     @ray.method(enable_task_events=False, num_returns=3)
@@ -488,6 +491,15 @@ class FlowPool:
         speaker_id,
         params: Params,
     ):
+        first_hop_padding = int(np.ceil(speech_tokens.shape[1] / self.hop_len) * self.hop_len - speech_tokens.shape[1])
+        pre_lookahead_len = self.pre_lookahead_len
+        flow_window_size = max(params.flow_window_size, params.flow_window_shift)
+        flow_window_shift = params.flow_window_shift
+
+        speech_tokens = ray.put(speech_tokens)
+        speech_mels = ray.put(speech_mels)
+        speaker_embedding = ray.put(speaker_embedding)
+
         offset = 0
         index = 0
         received = []
@@ -498,11 +510,14 @@ class FlowPool:
             received.append(speech_token)
 
             if params.stream:
-                if offset > params.flow_window_size:
-                    offset -= params.flow_window_shift
-                    received = received[params.flow_window_shift :]
+                hop_len = self.hop_len + first_hop_padding if offset == 0 else self.hop_len
 
-                flow_len = offset + self.hop_len + self.pre_lookahead_len
+                if flow_window_shift > 0:
+                    while offset > flow_window_size:
+                        offset -= flow_window_shift
+                        received = received[flow_window_shift:]
+
+                flow_len = offset + hop_len + pre_lookahead_len
                 if len(received) > flow_len:  # no `=` ensure remaning
                     input_tokens = torch.tensor(received[:flow_len]).unsqueeze(0)
                     self.submit(
@@ -516,7 +531,7 @@ class FlowPool:
                         speaker_id,
                         id,
                     )
-                    offset += self.hop_len
+                    offset += hop_len
                     index += 1
 
         if len(received) > 0:
@@ -543,6 +558,10 @@ class FlowPool:
         speaker_id,
         params: Params,
     ):
+        speech_tokens = ray.put(speech_tokens)
+        speech_mels = ray.put(speech_mels)
+        speaker_embedding = ray.put(speaker_embedding)
+
         index = 0
         received = []
         flow_len = self.hop_len + self.pre_lookahead_len
@@ -587,13 +606,13 @@ class FlowPool:
         id = uuid.uuid4().hex
         self.buffer[id] = asyncio.PriorityQueue()
 
-        speech_tokens_ref = ray.put(prompt.flow_speech_tokens.detach())
-        speech_mels_ref = ray.put(prompt.speech_mels.detach())
-        speaker_embedding_ref = ray.put(prompt.speaker_embedding.detach())
+        speech_tokens = prompt.flow_speech_tokens.detach()
+        speech_mels = prompt.speech_mels.detach()
+        speaker_embedding = prompt.speaker_embedding.detach()
         speaker_id = prompt.speaker_id
 
         handle_input_task = asyncio.create_task(
-            self.handle_input(id, input_queue, speech_tokens_ref, speech_mels_ref, speaker_embedding_ref, speaker_id, params)
+            self.handle_input(id, input_queue, speech_tokens, speech_mels, speaker_embedding, speaker_id, params)
         )
 
         try:
@@ -609,7 +628,8 @@ class FlowPool:
                         break
                     expected_index += 1
                 else:
-                    await self.buffer[id].put((index, finalized, speech_mel))
+                    await self.buffer[id].put((index, finalized, speech_mel, None))
+                    await asyncio.sleep(0)
         finally:
             self.clean()
             await output_queue.put(None)

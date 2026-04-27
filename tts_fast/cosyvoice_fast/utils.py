@@ -9,7 +9,6 @@ from loguru import logger
 
 class EstimatorPool:
     def __init__(self, estimator_engine, estimator_count, device):
-        print(device)
         estimator_count = max(estimator_count, 1)
         self.pool = queue.Queue(maxsize=estimator_count)
         self.engine = estimator_engine
@@ -57,7 +56,6 @@ def forward_estimator(self, x, mask, mu, t, spks, cond, *args, **kwargs):
         assert estimator.execute_async_v3(torch.cuda.current_stream().cuda_stream)
 
         self.estimator_pool.put(estimator, context)
-
         return x
 
 
