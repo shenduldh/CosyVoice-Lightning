@@ -134,7 +134,7 @@
    sh run_server.sh
    ```
 
-2. 设置 DEBUG=1 后访问 `http(s)://ip:port/debug` 使用 webui。
+2. 设置 `DEBUG=1` 后访问 `http(s)://ip:port/debug` 使用 webui。
 
 3. 测试和评估 API：
 
