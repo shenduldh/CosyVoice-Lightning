@@ -13,7 +13,7 @@
 
 ## Updates
 
-- [2026/08/17] 新增 `CosyVoice 3` Flow 流式推理；支持 Flow 和 HiFT 的 `Torch-TensorRT` 编译；首帧延迟减低到 ~250ms。
+- [2026/08/17] 新增 `CosyVoice 3` Flow 流式推理；支持 Flow 和 HiFT 的 `Torch-TensorRT` 编译；首帧延迟降低至 ~250ms。
 
 - [2026/03/23] 新增 `CosyVoice 3`；支持超长文本生成；使用 [NovaSR](https://github.com/ysharma3501/NovaSR) 提升克隆质量。
 
