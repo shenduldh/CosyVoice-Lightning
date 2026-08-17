@@ -15,14 +15,34 @@ from starlette.responses import JSONResponse, StreamingResponse
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from io import BytesIO
 import soundfile
+from contextlib import aclosing
 from loguru import logger
 
 from bases import *
-from utils import *
+from utils import (
+    truncate_long_str,
+    any_format_to_ndarray,
+    save_audio,
+    async_repack,
+    remove_silence,
+    whats_wrong_with,
+    format_ndarray_to_base64,
+    get_av_audio_encoder,
+)
+from debug import Debugger
 from tts_fast.cosyvoice_fast.entry import CosyVoiceEntry
 from tts_fast.cosyvoice_fast.common import CosyVoiceInputType
 from seg2stream import SegmentationManager, SegSent2GeneratorConfig, SegSent2StreamConfig, get_phrase_segmenter
-from debug import Debugger
+
+
+@dataclass
+class TTSTask:
+    params: TTSStreamRequestParameters
+    id: str = field(default_factory=lambda: uuid.uuid4().hex)
+    date: datetime = field(default_factory=datetime.now)
+    counter: int = 0
+    queue: asyncio.Queue = field(default_factory=asyncio.Queue)
+    accum_len: int = 0
 
 
 class MyApp(FastAPI):
@@ -30,7 +50,7 @@ class MyApp(FastAPI):
     config: dict
     seg_manager: SegmentationManager
     debugger: Debugger
-    queues: dict[str, asyncio.Queue] = {}
+    tasks: dict[str, TTSTask] = {}
 
 
 @asynccontextmanager
@@ -75,26 +95,29 @@ async def lifespan(app: MyApp):
 
     async def process_seg_output():
         async for id, text in app.seg_manager.get_async_output():
-            if id in app.queues:
+            if id in app.tasks:
+                this_task = app.tasks[id]
                 if text is None:
-                    app.queues[id].put_nowait(None)
-                    app.queues.pop(id)
+                    this_task.queue.put_nowait(None)
+                    app.tasks.pop(id)
                 elif len(text) > 0:
-                    logger.info(f"TTS Segment: {id=} {len(text)=} {text=}")
-                    app.queues[id].put_nowait(text)
-                    app.debugger.add_text(id, [text])
+                    this_len = len(text)
+                    max_len = this_task.params.max_text_length
+                    this_task.accum_len += this_len
+                    if this_task.accum_len > max_len:
+                        logger.info(f"Exceed Limit: {id=} {max_len=} accum_len={this_task.accum_len}")
+                        this_task.queue.put_nowait(None)
+                        app.tasks.pop(id)
+                    else:
+                        logger.info(f"TTS Segment: {id=} {this_len=} accum_len={this_task.accum_len} {text=}")
+                        app.tasks[id].queue.put_nowait(text)
+                        app.debugger.add_text(id, [text])
 
     seg_output_task = asyncio.create_task(process_seg_output())
 
     # load tts model
     app.tts_model = CosyVoiceEntry()
     logger.info("TTS model is loaded successfully.")
-
-    # load voice cache
-    speaker_cache_path = os.getenv("DEFAULT_SPEAKER_CACHE_PATH", path_to_root("assets", "default_speaker_cache.pt"))
-    if os.path.exists(speaker_cache_path):
-        speaker_ids = app.tts_model.load_cache(speaker_cache_path)
-        logger.info(f"Successfully load speakers: {speaker_ids}")
 
     # set debug
     app.debugger = Debugger(enabled=bool(int(os.getenv("DEBUG", "0"))))
@@ -120,7 +143,7 @@ async def general_exception_handler(request, e: Exception):
 
 @app.get("/")
 async def index() -> str:
-    return f"Hello."
+    return "Hello."
 
 
 @app.get("/alive")
@@ -153,7 +176,7 @@ async def load_cache(req: LoadCacheInput) -> dict:
 
 @app.post("/clone")
 async def clone(req: CloneInput) -> CloneOutput:
-    logger.info("Request Params: %s" % truncate_long_str(req.model_dump()))
+    logger.info(f"Request Params: {truncate_long_str(req.model_dump())}")
 
     prompt_id = req.prompt_id
     prompt_text = req.prompt_text
@@ -173,19 +196,19 @@ async def clone(req: CloneInput) -> CloneOutput:
     s = time.time()
 
     if os.path.exists(prompt_audio):
-        app.tts_model.async_request(None, prompt_audio, prompt_text, None, prompt_id, loudness)
+        app.tts_model.async_request(None, None, prompt_audio, prompt_text, None, prompt_id, loudness)
     elif prompt_audio.startswith("http"):
         prompt_audio = requests.get(prompt_audio).content
         with NamedTemporaryFile() as f:
             f.write(prompt_audio)
             f.flush()
-            app.tts_model.async_request(None, f.name, prompt_text, None, prompt_id, loudness)
+            app.tts_model.async_request(None, None, f.name, prompt_text, None, prompt_id, loudness)
     else:
         prompt_audio = any_format_to_ndarray(prompt_audio, audio_format, sample_rate)
         with NamedTemporaryFile(suffix=".wav") as f:
             save_audio(prompt_audio, f.name, 16000)
             f.flush()
-            app.tts_model.async_request(None, f.name, prompt_text, None, prompt_id, loudness)
+            app.tts_model.async_request(None, None, f.name, prompt_text, None, prompt_id, loudness)
 
     e = time.time()
     logger.info(f"Clone time: {e - s}")
@@ -195,7 +218,7 @@ async def clone(req: CloneInput) -> CloneOutput:
 
 @app.post("/tts")
 async def tts(req: TTSInput):
-    logger.info("Request Params: %s" % req)
+    logger.info(f"Request Params: {req}")
 
     prompt_id = req.prompt_id
     instruct_text = req.instruct_text
@@ -208,11 +231,11 @@ async def tts(req: TTSInput):
 
     audio_ndarray = []
     async for chunk in app.tts_model.async_request(
-        req.text,
-        None,
-        None,
-        instruct_text,
-        prompt_id,
+        tts_text=req.text,
+        prompt_audio=None,
+        prompt_text=None,
+        instruct_text=instruct_text,
+        speaker_id=prompt_id,
         split_text=True,
         stream=True,
         generation_params=req.generation_params.model_dump(exclude_unset=True),
@@ -239,30 +262,12 @@ async def tts(req: TTSInput):
         )
 
 
-@dataclass
-class TTSTask:
-    params: TTSStreamRequestParameters
-    id: str = field(default_factory=lambda: uuid.uuid4().hex)
-    date: datetime = field(default_factory=datetime.now)
-    counter: int = 0
-    queue: asyncio.Queue = field(default_factory=asyncio.Queue)
-
-
 async def run_task(tts_task: TTSTask, websocket: WebSocket):
-    # from pyinstrument import Profiler
-    # profiler = Profiler(interval=0.0001, async_mode="enabled", use_timing_thread=True)
-    # profiler.start()
-
-    # from torch.profiler import profile, ProfilerActivity
-    # with profile(
-    #     activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
-    #     record_shapes=True,
-    #     profile_memory=True,
-    #     with_stack=True,
-    # ) as prof:
-
     try:
+        start_time = time.perf_counter()
+
         output_stream = app.tts_model.async_request(
+            tts_task.id,
             tts_task.queue,
             None,
             None,
@@ -272,57 +277,54 @@ async def run_task(tts_task: TTSTask, websocket: WebSocket):
             generation_params=tts_task.params.generation_params.model_dump(exclude_unset=True),
             input_type=CosyVoiceInputType.QUEUE,
         )
+        audio_encoder = get_av_audio_encoder(app.tts_model.sample_rate, tts_task.params.sample_rate, tts_task.params.audio_format)
         repacking_size = int(app.tts_model.sample_rate * tts_task.params.slice_seconds)
         capacity = int(app.tts_model.sample_rate * 10)
         repacked_stream = async_repack(output_stream, repacking_size, repacking_size, capacity)
 
-        async for chunk_ndarray in repacked_stream:
-            if app.config["tts"]["do_removing_silence"]:
-                chunk_ndarray = remove_silence(
-                    chunk_ndarray,
-                    app.tts_model.sample_rate,
-                    (
-                        app.config["tts"]["first_left_retention_seconds"]
-                        if tts_task.counter == 0
-                        else app.config["tts"]["left_retention_seconds"]
-                    ),
-                    app.config["tts"]["right_retention_seconds"],
+        async with aclosing(output_stream), aclosing(repacked_stream) as stream:
+            async for chunk_ndarray in stream:
+                if app.config["tts"]["do_removing_silence"]:
+                    chunk_ndarray = remove_silence(
+                        chunk_ndarray,
+                        app.tts_model.sample_rate,
+                        (app.config["tts"]["first_left_retention_seconds"] if tts_task.counter == 0 else app.config["tts"]["left_retention_seconds"]),
+                        app.config["tts"]["right_retention_seconds"],
+                    )
+                chunk_base64 = await asyncio.to_thread(audio_encoder.encode, chunk_ndarray)
+                await websocket.send_json(
+                    TTSStreamOutput(
+                        id=tts_task.id,
+                        is_end=False,
+                        index=tts_task.counter,
+                        data=chunk_base64,
+                        audio_format=tts_task.params.audio_format,
+                        sample_rate=tts_task.params.sample_rate,
+                    ).model_dump()
                 )
-            chunk_base64 = format_ndarray_to_base64(
-                chunk_ndarray,
-                app.tts_model.sample_rate,
-                tts_task.params.sample_rate,
-                tts_task.params.audio_format,
-            )
-            await websocket.send_json(
-                TTSStreamOutput(
-                    id=tts_task.id,
-                    is_end=False,
-                    index=tts_task.counter,
-                    data=chunk_base64,
-                    audio_format=tts_task.params.audio_format,
-                    sample_rate=tts_task.params.sample_rate,
-                ).model_dump()
-            )
-            tts_task.counter += 1
-            app.debugger.add_chunk(tts_task.id, chunk_ndarray)
+                if tts_task.counter == 0:
+                    spent_time = round((time.perf_counter() - start_time) * 1000, 2)
+                    logger.info(f"TTS first response: id={tts_task.id} spent_time={spent_time}")
+                tts_task.counter += 1
+                app.debugger.add_chunk(tts_task.id, chunk_ndarray)
 
         await websocket.send_json(TTSStreamOutput(id=tts_task.id, is_end=True, index=tts_task.counter).model_dump())
         app.debugger.save(tts_task.id, tts_task, app.tts_model.sample_rate)
+
     except BaseException as e:
-        asyncio.create_task(output_stream.athrow(StopAsyncIteration))
         if not isinstance(e, asyncio.CancelledError):
             raise
 
-    # prof.export_chrome_trace("torch_profile.json")
-    # profiler.stop()
-    # profiler.print()
-    # with open("profile.html", "w") as f:
-    #     f.write(profiler.output_html())
+    finally:
+        app.debugger.discard(tts_task.id)
+        try:
+            audio_encoder.close()
+        except:
+            pass
 
 
 @app.websocket("/tts")
-async def tts(websocket: WebSocket):
+async def tts_websocket(websocket: WebSocket):
     await websocket.accept()
 
     curr_task = None
@@ -331,7 +333,7 @@ async def tts(websocket: WebSocket):
     while True:
         try:
             req = await websocket.receive_json()
-            if running_task is None:
+            if running_task is None or curr_task is None:
                 req = TTSStreamRequestInput(**req)
                 req_params = req.req_params
                 if req_params.prompt_id not in app.tts_model.get_speakers():
@@ -341,11 +343,11 @@ async def tts(websocket: WebSocket):
 
                 curr_task = TTSTask(params=req_params)
                 logger.info(f"TTS Request: {curr_task}")
-                app.queues[curr_task.id] = curr_task.queue
+                app.tasks[curr_task.id] = curr_task
                 running_task = asyncio.create_task(run_task(curr_task, websocket))
             else:
                 req = TTSStreamTextInput(**req)
-                logger.info(f"TTS Stream: {req}")
+                logger.info(f"TTS Stream: id={curr_task.id} req={req}")
                 app.seg_manager.add_text(curr_task.id, req.text)
                 if req.done:
                     app.seg_manager.add_text(curr_task.id, None)
@@ -355,7 +357,7 @@ async def tts(websocket: WebSocket):
 
         except BaseException as e:
             if curr_task is not None:
-                if curr_task.id in app.queues:
+                if curr_task.id in app.tasks:
                     app.seg_manager.add_text(curr_task.id, None)
                 curr_task = None
             if running_task is not None:
@@ -365,5 +367,5 @@ async def tts(websocket: WebSocket):
                 running_task = None
             if isinstance(e, WebSocketDisconnect):
                 break
-            logger.error(f"Error in websocket:\n{traceback.format_exc()}")
+            logger.error(f"Error in TTS (WebSocket):\n{traceback.format_exc()}")
             await websocket.send_json({"error": True, "message": whats_wrong_with(e)})

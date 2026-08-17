@@ -4,10 +4,7 @@ from torch import nn
 from sglang.srt.distributed import get_pp_group
 from sglang.srt.layers.logits_processor import LogitsProcessor
 from sglang.srt.layers.quantization.base_config import QuantizationConfig
-from sglang.srt.layers.vocab_parallel_embedding import (
-    ParallelLMHead,
-    VocabParallelEmbedding,
-)
+from sglang.srt.layers.vocab_parallel_embedding import ParallelLMHead, VocabParallelEmbedding
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch, PPProxyTensors
 from sglang.srt.model_loader.weight_utils import default_weight_loader
 from sglang.srt.utils import add_prefix
@@ -40,9 +37,7 @@ class CosyVoice3LLM(nn.Module):
         self.num_generation_tokens = self.num_speech_tokens + self.num_stop_tokens
 
         self.config.vocab_size = self.num_text_tokens
-        self.model = Qwen2Model(
-            self.config, quant_config=quant_config, prefix=add_prefix("model", prefix)
-        )
+        self.model = Qwen2Model(self.config, quant_config=quant_config, prefix=add_prefix("model", prefix))
         self.config.vocab_size = self.num_generation_tokens
         self.logits_processor = LogitsProcessor(self.config)
 
@@ -88,19 +83,13 @@ class CosyVoice3LLM(nn.Module):
         )
 
         if self.pp_group.is_last_rank:
-            return self.logits_processor(
-                input_ids, hidden_states, self.llm_decoder, forward_batch
-            )
+            return self.logits_processor(input_ids, hidden_states, self.llm_decoder, forward_batch)
         else:
             return hidden_states
 
-    def convert_weights(
-        self, weights: Iterable[Tuple[str, torch.Tensor]]
-    ) -> Iterable[Tuple[str, torch.Tensor]]:
+    def convert_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]) -> Iterable[Tuple[str, torch.Tensor]]:
         for name, loaded_weight in weights:
-            if name.startswith(
-                ("llm.model.model.", "speech_embedding.", "llm_decoder.")
-            ):
+            if name.startswith(("llm.model.model.", "speech_embedding.", "llm_decoder.")):
                 if name.startswith("llm.model.model."):
                     name = name.replace("llm.model.model.", "model.")
                 yield name, loaded_weight
@@ -137,16 +126,12 @@ class CosyVoice3LLM(nn.Module):
                     continue
                 if name in params_dict.keys():
                     param = params_dict[name]
-                    weight_loader = getattr(
-                        param, "weight_loader", default_weight_loader
-                    )
+                    weight_loader = getattr(param, "weight_loader", default_weight_loader)
                     weight_loader(param, loaded_weight)
 
         device = self.speech_embedding.weight.device
         speech_embedding = self.speech_embedding.weight
-        text_embedding = self.model.embed_tokens(
-            torch.arange(self.num_text_tokens).to(device)
-        )
+        text_embedding = self.model.embed_tokens(torch.arange(self.num_text_tokens).to(device))
         concatenated = torch.cat([speech_embedding, text_embedding])
         self.mixed_embedding.weight_loader(self.mixed_embedding.weight, concatenated)
         del self.speech_embedding

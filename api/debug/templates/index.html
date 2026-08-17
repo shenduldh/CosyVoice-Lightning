@@ -4,101 +4,265 @@
 
 <head>
     <meta charset="UTF-8">
+    {% if request.url.scheme == "https" %}
+    <meta http-equiv="Content-Security-Policy" content="upgrade-insecure-requests">
+    {% endif %}
     <title>TTS Debug</title>
     <script src="{{ url_for('debug_static', path='vue@3.5.25.global.prod.js') }}"></script>
     <script src="{{ url_for('debug_static', path='naive-ui@2.43.2.prod.js') }}"></script>
     <script src="{{ url_for('debug_static', path='highlight/highlight.min.js') }}"></script>
     <script src="{{ url_for('debug_static', path='utils.js') }}"></script>
     <style>
+        :root {
+            --bg: #f5f7fa;
+            --panel: #ffffff;
+            --accent: #2e6be6;
+            --text-1: #1f2329;
+            --text-2: #8a919f;
+            --border: #e5e7eb;
+        }
+
+        * {
+            box-sizing: border-box;
+        }
+
+        body {
+            background: var(--bg);
+            margin: 0;
+        }
+
+        .toolbar {
+            position: sticky;
+            top: 0;
+            z-index: 10;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 8px 16px;
+            background: var(--panel);
+            border-bottom: 1px solid var(--border);
+        }
+
+        .toolbar-title {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            font-size: 15px;
+            font-weight: 600;
+            color: var(--text-1);
+        }
+
+        .main {
+            display: flex;
+            align-items: flex-start;
+        }
+
+        .sidebar {
+            width: 380px;
+            min-width: 380px;
+            max-height: calc(100vh - 49px);
+            position: sticky;
+            top: 49px;
+            overflow-y: auto;
+            padding: 12px;
+            padding-bottom: 96px;
+            background: var(--panel);
+            border-right: 1px solid var(--border);
+        }
+
+        .panel-title {
+            font-size: 13px;
+            font-weight: 600;
+            color: var(--text-1);
+            margin: 12px 0 8px;
+        }
+
+        .panel-title:first-child {
+            margin-top: 0;
+        }
+
+        .content {
+            flex: 1;
+            min-width: 0;
+            max-height: calc(100vh - 49px);
+            overflow-y: auto;
+            padding: 12px 16px;
+            padding-bottom: 96px;
+        }
+
+        .tree-toolbar {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            margin-bottom: 12px;
+        }
+
+        .empty-state {
+            padding: 48px 0;
+            text-align: center;
+            color: var(--text-2);
+            font-size: 13px;
+        }
+
+        .player-bar {
+            position: fixed;
+            bottom: 16px;
+            left: 50%;
+            transform: translateX(-50%);
+            width: 640px;
+            max-width: calc(100vw - 32px);
+            z-index: 20;
+            background: var(--panel);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            box-shadow: 0 4px 20px rgba(31, 35, 41, .12);
+            padding: 8px 12px;
+        }
+
+        .player-name {
+            font-size: 12px;
+            color: var(--text-2);
+            margin-bottom: 4px;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
         audio {
             background-color: #77777725;
             border-radius: 0;
+            width: 100%;
+            height: 36px;
         }
 
         audio::-webkit-media-controls-enclosure {
             background-color: unset;
         }
+
+        @media (max-width: 900px) {
+            .main {
+                flex-direction: column;
+            }
+
+            .sidebar {
+                width: 100%;
+                min-width: 0;
+                position: static;
+                max-height: none;
+                border-right: none;
+                border-bottom: 1px solid var(--border);
+            }
+
+            .content {
+                max-height: none;
+            }
+        }
     </style>
 </head>
 
+{% raw %}
+
 <body>
     <div id="app">
-        <n-config-provider :hljs="hljs">
-            <n-flex size="small" justify="center" style="position: sticky; top: 0; z-index: 10">
-                <n-card style="max-width: 400px; min-width: 200px" hoverable>
-                    <n-form label-placement="left" label-width="auto" size="small">
-                        <n-form-item label="音色 ID">
-                            <n-input type="text" v-model:value="cloneParams.id" clearable />
-                        </n-form-item>
-                        <n-form-item label="音量大小">
-                            <n-input-number v-model:value="cloneParams.loudness">
-                                <template #suffix>db (LKFS)</template>
-                            </n-input-number>
-                        </n-form-item>
-                        <n-form-item label="参考文本">
-                            <n-input type="textarea" v-model:value="cloneParams.text" clearable />
-                        </n-form-item>
-                        <n-form-item label="参考音频">
-                            <n-upload directory-dnd accept=".mp3,.wav" v-model:file-list="cloneParams.audio" max="1">
-                                <n-upload-dragger>
-                                    <div>
-                                        <n-icon size="24" depth="4">
-                                            <svg xmlns="http://www.w3.org/2000/svg"
-                                                xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="0 0 24 24">
-                                                <path
-                                                    d="M19.35 10.04A7.49 7.49 0 0 0 12 4C9.11 4 6.6 5.64 5.35 8.04A5.994 5.994 0 0 0 0 14c0 3.31 2.69 6 6 6h13c2.76 0 5-2.24 5-5c0-2.64-2.05-4.78-4.65-4.96zM14 13v4h-4v-4H7l4.65-4.65c.2-.2.51-.2.71 0L17 13h-3z"
-                                                    fill="currentColor"></path>
-                                            </svg>
-                                        </n-icon>
-                                    </div>
-                                    <n-text depth="3">点击或者拖动到此处来上传</n-text>
-                                </n-upload-dragger>
-                            </n-upload>
-                        </n-form-item>
-                        <n-form-item label=" ">
-                            <n-button type="success" @click="clone" :loading="cloneLoading">克隆</n-button>
-                        </n-form-item>
-                    </n-form>
-                </n-card>
+        <n-config-provider :hljs="hljs" :theme-overrides="themeOverrides">
+            <header class="toolbar">
+                <div class="toolbar-title">
+                    <span>TTS Debug</span>
+                </div>
+                <n-text depth="3" style="font-size: 12px">最后刷新 {{ lastUpdate || "--" }}</n-text>
+            </header>
 
-                <n-card style="max-width: 400px" hoverable>
-                    <n-form label-placement="left" label-width="auto" size="small">
-                        <n-form-item label="音色 ID">
-                            <n-select filterable multiple v-model:value="deleteIDs" :options="promptIDs"
-                                placeholder="选择要删除的音色 ID" @focus="updatePromptIDs" clearable />
-                        </n-form-item>
-                        <n-form-item label=" ">
-                            <n-button type="error" @click="deletePromptIDs" :loading="deleteLoading">删除</n-button>
-                        </n-form-item>
-                    </n-form>
-                </n-card>
+            <div class="main">
+                <aside class="sidebar">
+                    <div class="panel-title">克隆音色</div>
+                    <n-card :bordered="true" hoverable>
+                        <n-form label-placement="left" label-width="auto" size="small">
+                            <n-form-item label="音色 ID">
+                                <n-input type="text" v-model:value="cloneParams.id" clearable />
+                            </n-form-item>
+                            <n-form-item label="音量大小">
+                                <n-input-number v-model:value="cloneParams.loudness">
+                                    <template #suffix>db (LKFS)</template>
+                                </n-input-number>
+                            </n-form-item>
+                            <n-form-item label="参考文本">
+                                <n-input type="textarea" v-model:value="cloneParams.text" clearable />
+                            </n-form-item>
+                            <n-form-item label="参考音频">
+                                <n-upload directory-dnd accept=".mp3,.wav" v-model:file-list="cloneParams.audio"
+                                    max="1">
+                                    <n-upload-dragger>
+                                        <div>
+                                            <n-icon size="24" depth="4">
+                                                <svg xmlns="http://www.w3.org/2000/svg"
+                                                    xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="0 0 24 24">
+                                                    <path
+                                                        d="M19.35 10.04A7.49 7.49 0 0 0 12 4C9.11 4 6.6 5.64 5.35 8.04A5.994 5.994 0 0 0 0 14c0 3.31 2.69 6 6 6h13c2.76 0 5-2.24 5-5c0-2.64-2.05-4.78-4.65-4.96zM14 13v4h-4v-4H7l4.65-4.65c.2-.2.51-.2.71 0L17 13h-3z"
+                                                        fill="currentColor"></path>
+                                                </svg>
+                                            </n-icon>
+                                        </div>
+                                        <n-text depth="3">点击或者拖动到此处来上传</n-text>
+                                    </n-upload-dragger>
+                                </n-upload>
+                            </n-form-item>
+                            <n-form-item label=" ">
+                                <n-button type="primary" block @click="clone" :loading="cloneLoading">克隆</n-button>
+                            </n-form-item>
+                        </n-form>
+                    </n-card>
 
-                <n-card style="max-width: 400px" hoverable>
-                    <n-form label-placement="left" label-width="auto" size="small">
-                        <n-form-item label="音色 ID">
-                            <n-select filterable v-model:value="generateParams.id" :options="promptIDs"
-                                placeholder="选择要合成的音色 ID" @focus="updatePromptIDs" clearable />
-                        </n-form-item>
-                        <n-form-item label="合成文本">
-                            <n-input type="textarea" v-model:value="generateParams.text" clearable />
-                        </n-form-item>
-                        <n-form-item label="指令文本">
-                            <n-input type="textarea" v-model:value="generateParams.instruct" clearable />
-                        </n-form-item>
-                        <n-form-item label=" ">
-                            <n-button type="success" @click="generate" :loading="generateLoading">合成</n-button>
-                        </n-form-item>
-                    </n-form>
-                </n-card>
-            </n-flex>
+                    <div class="panel-title">合成测试</div>
+                    <n-card :bordered="true" hoverable>
+                        <n-form label-placement="left" label-width="auto" size="small">
+                            <n-form-item label="音色 ID">
+                                <n-select filterable v-model:value="generateParams.id" :options="promptIDs"
+                                    placeholder="选择要合成的音色 ID" @focus="updatePromptIDs" clearable />
+                            </n-form-item>
+                            <n-form-item label="合成文本">
+                                <n-input type="textarea" v-model:value="generateParams.text" clearable />
+                            </n-form-item>
+                            <n-form-item label="指令文本">
+                                <n-input type="textarea" v-model:value="generateParams.instruct" clearable />
+                            </n-form-item>
+                            <n-form-item label=" ">
+                                <n-button type="primary" block @click="generate"
+                                    :loading="generateLoading">合成</n-button>
+                            </n-form-item>
+                        </n-form>
+                    </n-card>
 
-            <div style="margin-bottom: 60px">
-                <n-button type="info" @click="updateData" size="small" dashed>刷新数据</n-button>
-                <n-tree block-line :data="data" :render-label="renderLabel" v-model:expanded-keys="expKeys" />
+                    <div class="panel-title">删除音色</div>
+                    <n-card :bordered="true" hoverable>
+                        <n-form label-placement="left" label-width="auto" size="small">
+                            <n-form-item label="音色 ID">
+                                <n-select filterable multiple v-model:value="deleteIDs" :options="promptIDs"
+                                    placeholder="选择要删除的音色 ID" @focus="updatePromptIDs" clearable />
+                            </n-form-item>
+                            <n-form-item label=" ">
+                                <n-button type="error" block @click="deletePromptIDs"
+                                    :loading="deleteLoading">删除</n-button>
+                            </n-form-item>
+                        </n-form>
+                    </n-card>
+                </aside>
+
+                <section class="content">
+                    <div class="tree-toolbar">
+                        <n-button type="info" size="small" dashed :loading="treeLoading"
+                            @click="updateData">刷新数据</n-button>
+                    </div>
+                    <n-spin :show="treeLoading">
+                        <div v-if="empty" class="empty-state">暂无回放数据</div>
+                        <n-tree v-else block-line :data="data" :render-label="renderLabel"
+                            v-model:expanded-keys="expKeys" />
+                    </n-spin>
+                </section>
             </div>
 
-            <div style="position: fixed; bottom: 0">
-                <audio ref="playerRef" controls style="width: 100vw"></audio>
+            <div class="player-bar">
+                <div class="player-name">{{ playingName || "未播放" }}</div>
+                <audio ref="playerRef" controls></audio>
             </div>
 
             <n-modal v-model:show="showModal">
@@ -111,7 +275,19 @@
     </div>
     <script>
         const { NButton, NIcon, NText, NFlex, createDiscreteApi } = naive
-        const { createApp, ref, reactive, h, onMounted, resolveDirective } = Vue
+        const { createApp, ref, reactive, h, onMounted, computed, resolveDirective } = Vue
+
+        const themeOverrides = {
+            common: {
+                primaryColor: '#2e6be6',
+                primaryColorHover: '#5589ec',
+                primaryColorPressed: '#245bc4',
+                borderRadius: '8px',
+                fontFamily: "-apple-system, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif",
+            },
+            Card: { borderRadius: '12px' },
+            Button: { borderRadiusMedium: '8px' },
+        }
 
         const fetchData = async () => {
             const keys = []
@@ -122,6 +298,7 @@
                     type: d.type,
                     dl_href: d.dl_href,
                     level: d.level,
+                    size: d.size,
                 }
                 if (d.type === "folder") {
                     converted.del_href = d.del_href
@@ -151,21 +328,46 @@
                 const cloneLoading = ref(false)
                 const generateLoading = ref(false)
                 const deleteLoading = ref(false)
+                const treeLoading = ref(false)
+                const lastUpdate = ref(null)
+                const playingName = ref(null)
+
+                const empty = computed(() => data.value.length === 1 && data.value[0].children.length === 0)
 
                 const { dialog, message, loadingBar } = createDiscreteApi(["dialog", "message"])
 
-                const updateData = async () => {
-                    const { res, keys } = await fetchData()
-                    data.value = [res]
-                    keys.forEach(i => { if (!expKeys.value.includes(i)) expKeys.value.push(i) })
+                const formatSize = bytes => {
+                    if (bytes == null) return ""
+                    if (bytes < 1024) return `${bytes} B`
+                    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
+                    return `${(bytes / 1024 / 1024).toFixed(2)} MB`
                 }
 
-                onMounted(updateData)
+                const updateData = async () => {
+                    treeLoading.value = true
+                    try {
+                        const { res, keys } = await fetchData()
+                        data.value = [res]
+                        keys.forEach(i => { if (!expKeys.value.includes(i)) expKeys.value.push(i) })
+                        lastUpdate.value = new Date().toLocaleTimeString()
+                    } catch (e) {
+                        message.error(`加载失败: ${e.message}`)
+                    } finally {
+                        treeLoading.value = false
+                    }
+                }
+
+                onMounted(() => updateData())
 
                 const renderLabel = ({ option }) => {
                     const showSuffix = ref(false)
-                    const { label, key, type, dl_href, del_href, level } = option
+                    const { label, key, type, dl_href, del_href, level, size } = option
                     const is_folder = type === "folder"
+                    const iconPath = is_folder
+                        ? "M10 4H4c-1.1 0-1.99.9-1.99 2L2 18c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2h-8l-2-2z"
+                        : dl_href.endsWith(".wav")
+                            ? "M12 3v10.55A4 4 0 1 0 14 17V7h4V3h-6z"
+                            : "M14 2H6c-1.1 0-1.99.9-1.99 2L4 20c0 1.1.89 2 1.99 2H18c1.1 0 2-.9 2-2V8l-6-6zm2 16H8v-2h8v2zm0-4H8v-2h8v2zm-3-5V3.5L18.5 9H13z"
 
                     let name = label
                     if (level == 0) name = "root"
@@ -186,6 +388,7 @@
                             align: "center",
                             async onClick() {
                                 if (dl_href.endsWith(".wav")) {
+                                    playingName.value = name
                                     playerRef.value.setAttribute("autoplay", true)
                                     playerRef.value.src = dl_href
                                 } else if (dl_href.endsWith(".json")) {
@@ -200,6 +403,12 @@
                         },
                         {
                             default: () => [
+                                h("svg", {
+                                    viewBox: "0 0 24 24",
+                                    width: "16px",
+                                    height: "16px",
+                                    style: `margin-right: 6px; color: ${is_folder ? "#8a919f" : "#2e6be6"}; flex-shrink: 0`,
+                                }, [h("path", { d: iconPath, fill: "currentColor" })]),
                                 h(NText, {
                                     onClick() {
                                         if (is_folder) {
@@ -208,18 +417,21 @@
                                         }
                                     }
                                 }, name),
+                                !is_folder && size != null
+                                    ? h(NText, { depth: 3, style: "font-size: 12px; margin-left: 8px" }, formatSize(size))
+                                    : null,
                                 h(NButton, {
                                     text: true,
                                     type: "success",
                                     size: "tiny",
-                                    style: { display: showSuffix.value ? "block" : "none" },
+                                    style: { display: showSuffix.value ? "block" : "none", transition: "opacity .15s" },
                                     onClick() { downloaderRef.value.href = dl_href; downloaderRef.value.click() }
                                 }, "下载"),
                                 h(NButton, {
                                     text: true,
                                     type: "error",
                                     size: "tiny",
-                                    style: { display: showSuffix.value ? "block" : "none" },
+                                    style: { display: showSuffix.value ? "block" : "none", transition: "opacity .15s" },
                                     onClick() {
                                         dialog.warning({
                                             title: "警告",
@@ -310,16 +522,15 @@
                     }
                     ws.onmessage = async e => {
                         const msg = JSON.parse(e.data)
-                        console.log(msg)
                         if (msg.data && msg.data.length > 0) audioData += msg.data
                         if (msg.error) message.error(`合成存在错误: ${msg.message}`)
                         if (msg.is_end || msg.error) {
                             ws.close()
                             let arrayBuffer = Uint8Array.from(atob(audioData), c => c.charCodeAt(0)).buffer
                             arrayBuffer = int16ArrayBufferToWav(arrayBuffer, 24000, 16, 1)
+                            playingName.value = `${id}.wav`
                             playerRef.value.setAttribute("autoplay", true)
-                            playerRef.value.src = URL.createObjectURL(new Blob([arrayBuffer], { mineType: "audio/wav" }))
-                            playerRef.value.title = `${id}.wav`
+                            playerRef.value.src = URL.createObjectURL(new Blob([arrayBuffer], { type: "audio/wav" }))
                             playerRef.value.onloadedmetadata = async () => {
                                 message.success("合成完成")
                                 generateLoading.value = false
@@ -341,7 +552,7 @@
                         method: "post", headers: { "Content-Type": "application/json" },
                         body: JSON.stringify({ prompt_ids: deleteIDs.value }),
                     })
-                    res = await res.json(res)
+                    res = await res.json()
                     message.success(`“${res.removed_speakers.join("、")}” 已删除。`)
                     deleteIDs.value = []
 
@@ -349,6 +560,7 @@
                 }
 
                 return {
+                    themeOverrides,
                     data,
                     showModal,
                     expKeys,
@@ -369,10 +581,15 @@
                     downloaderRef,
                     playerRef,
                     hljs,
+                    treeLoading,
+                    lastUpdate,
+                    empty,
+                    playingName,
                 }
             }
         }).use(naive).mount('#app')
     </script>
 </body>
+{% endraw %}
 
 </html>

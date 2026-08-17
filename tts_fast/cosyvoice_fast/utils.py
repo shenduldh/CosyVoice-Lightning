@@ -1,10 +1,13 @@
 import os
 import torch
 import types
-from typing import Literal
 import queue
 import re
 from loguru import logger
+import threading
+import time
+from contextlib import contextmanager
+import gc
 
 
 class EstimatorPool:
@@ -14,49 +17,55 @@ class EstimatorPool:
         self.engine = estimator_engine
         for _ in range(estimator_count):
             estimator = self.engine.create_execution_context()
-            stream = torch.cuda.stream(torch.cuda.Stream(device))
+            stream = torch.cuda.Stream(device)
             assert estimator is not None
             self.pool.put((estimator, stream))
         assert not self.pool.empty()
 
     def get(self):
-        estimator, context = self.pool.get()
-        torch.cuda.current_stream().synchronize()
-        return estimator, context, self.engine
+        estimator, stream = self.pool.get()
+        return estimator, stream, self.engine
 
-    def put(self, estimator, context):
-        torch.cuda.current_stream().synchronize()
-        self.pool.put((estimator, context))
+    def put(self, estimator, stream):
+        self.pool.put((estimator, stream))
 
 
 def forward_estimator(self, x, mask, mu, t, spks, cond, *args, **kwargs):
-    estimator, context, engine = self.estimator_pool.get()
-    with context:
-        btz, _, in_dims = x.size()
-        estimator.set_input_shape("x", (btz, 80, in_dims))
-        estimator.set_input_shape("mask", (btz, 1, in_dims))
-        estimator.set_input_shape("mu", (btz, 80, in_dims))
-        estimator.set_input_shape("t", (btz,))
-        estimator.set_input_shape("spks", (btz, 80))
-        estimator.set_input_shape("cond", (btz, 80, in_dims))
+    estimator, executed_stream, engine = self.estimator_pool.get()
 
-        data_ptrs = [
-            x.contiguous().data_ptr(),
-            mask.contiguous().data_ptr(),
-            mu.contiguous().data_ptr(),
-            t.contiguous().data_ptr(),
-            spks.contiguous().data_ptr(),
-            cond.contiguous().data_ptr(),
-            x.data_ptr(),
-        ]
+    try:
+        producer_stream = torch.cuda.current_stream()
+        with torch.cuda.stream(executed_stream):
+            executed_stream.wait_stream(producer_stream)
 
-        for idx, data_ptr in enumerate(data_ptrs):
-            estimator.set_tensor_address(engine.get_tensor_name(idx), data_ptr)
+            btz, _, in_dims = x.size()
+            estimator.set_input_shape("x", (btz, 80, in_dims))
+            estimator.set_input_shape("mask", (btz, 1, in_dims))
+            estimator.set_input_shape("mu", (btz, 80, in_dims))
+            estimator.set_input_shape("t", (btz,))
+            estimator.set_input_shape("spks", (btz, 80))
+            estimator.set_input_shape("cond", (btz, 80, in_dims))
 
-        assert estimator.execute_async_v3(torch.cuda.current_stream().cuda_stream)
+            data_ptrs = [
+                x.contiguous().data_ptr(),
+                mask.contiguous().data_ptr(),
+                mu.contiguous().data_ptr(),
+                t.contiguous().data_ptr(),
+                spks.contiguous().data_ptr(),
+                cond.contiguous().data_ptr(),
+                x.data_ptr(),
+            ]
 
-        self.estimator_pool.put(estimator, context)
+            for idx, data_ptr in enumerate(data_ptrs):
+                estimator.set_tensor_address(engine.get_tensor_name(idx), data_ptr)
+
+            assert estimator.execute_async_v3(executed_stream.cuda_stream)
+
+        producer_stream.wait_stream(executed_stream)
         return x
+
+    finally:
+        self.estimator_pool.put(estimator, executed_stream)
 
 
 def get_data_ptr(tensor: torch.Tensor, dummy_buffer: torch.Tensor):
@@ -67,45 +76,52 @@ def get_data_ptr(tensor: torch.Tensor, dummy_buffer: torch.Tensor):
 
 
 def forward_estimator_chunk(self, x, mu, t, spks, cond, cnn_cache, att_cache):
-    estimator, context, engine = self.estimator_pool.get()
-    with context:
-        btz, _, in_dims = x.size()
-        # att_cache = att_cache[:, :, :, : 1000 - in_dims, :]
+    estimator, executed_stream, engine = self.estimator_pool.get()
 
-        estimator.set_input_shape("x", (btz, 80, in_dims))
-        estimator.set_input_shape("mu", (btz, 80, in_dims))
-        estimator.set_input_shape("t", (btz,))
-        estimator.set_input_shape("spks", (btz, 80))
-        estimator.set_input_shape("cond", (btz, 80, in_dims))
-        estimator.set_input_shape("cnn_cache", cnn_cache.shape)
-        estimator.set_input_shape("att_cache", att_cache.shape)
+    try:
+        producer_stream = torch.cuda.current_stream()
+        with torch.cuda.stream(executed_stream):
+            executed_stream.wait_stream(producer_stream)
 
-        new_cnn_cache = torch.empty_like(cnn_cache)
-        new_att_cache_shape = list(att_cache.shape)
-        new_att_cache_shape[3] += in_dims
-        new_att_cache = torch.empty(new_att_cache_shape, device=att_cache.device, dtype=x.dtype)
+            btz, _, in_dims = x.size()
+            # att_cache = att_cache[:, :, :, : 1000 - in_dims, :]
 
-        data_ptrs = [
-            x.contiguous().data_ptr(),
-            mu.contiguous().data_ptr(),
-            t.contiguous().data_ptr(),
-            spks.contiguous().data_ptr(),
-            cond.contiguous().data_ptr(),
-            cnn_cache.contiguous().data_ptr(),
-            get_data_ptr(att_cache, self.dummy_buffer),
-            x.data_ptr(),
-            new_cnn_cache.data_ptr(),
-            get_data_ptr(new_att_cache, self.dummy_buffer),
-        ]
+            estimator.set_input_shape("x", (btz, 80, in_dims))
+            estimator.set_input_shape("mu", (btz, 80, in_dims))
+            estimator.set_input_shape("t", (btz,))
+            estimator.set_input_shape("spks", (btz, 80))
+            estimator.set_input_shape("cond", (btz, 80, in_dims))
+            estimator.set_input_shape("cnn_cache", cnn_cache.shape)
+            estimator.set_input_shape("att_cache", att_cache.shape)
 
-        for i, j in enumerate(data_ptrs):
-            estimator.set_tensor_address(engine.get_tensor_name(i), j)
+            new_cnn_cache = torch.empty_like(cnn_cache)
+            new_att_cache_shape = list(att_cache.shape)
+            new_att_cache_shape[3] += in_dims
+            new_att_cache = torch.empty(new_att_cache_shape, device=att_cache.device, dtype=x.dtype)
 
-        assert estimator.execute_async_v3(torch.cuda.current_stream().cuda_stream)
+            data_ptrs = [
+                x.contiguous().data_ptr(),
+                mu.contiguous().data_ptr(),
+                t.contiguous().data_ptr(),
+                spks.contiguous().data_ptr(),
+                cond.contiguous().data_ptr(),
+                cnn_cache.contiguous().data_ptr(),
+                get_data_ptr(att_cache, self.dummy_buffer),
+                x.data_ptr(),
+                new_cnn_cache.data_ptr(),
+                get_data_ptr(new_att_cache, self.dummy_buffer),
+            ]
 
-        self.estimator_pool.put(estimator, context)
+            for i, j in enumerate(data_ptrs):
+                estimator.set_tensor_address(engine.get_tensor_name(i), j)
 
+            assert estimator.execute_async_v3(torch.cuda.current_stream().cuda_stream)
+
+        producer_stream.wait_stream(executed_stream)
         return x, new_cnn_cache, new_att_cache
+
+    finally:
+        self.estimator_pool.put(estimator, executed_stream)
 
 
 def set_flow_decoder_estimator(flow, estimator_engine, device, estimator_count=1):
@@ -115,57 +131,12 @@ def set_flow_decoder_estimator(flow, estimator_engine, device, estimator_count=1
     flow.decoder.forward_estimator_chunk = types.MethodType(forward_estimator_chunk, flow.decoder)
 
 
-def get_flow_decoder_estimator_input_shapes(
-    flow_type: Literal["cosyvoice2", "cosyvoice2_stepaudio_stream", "cosyvoice2_stepaudio_whole", "cosyvoice3"] = "cosyvoice2",
-):
-    match flow_type:
-        case "cosyvoice2" | "cosyvoice3":
-            min_shapes = [(2, 80, 4), (2, 1, 4), (2, 80, 4), (2,), (2, 80), (2, 80, 4)]
-            opt_shapes = [(2, 80, 193), (2, 1, 193), (2, 80, 193), (2,), (2, 80), (2, 80, 193)]
-            max_shapes = [(2, 80, 6800), (2, 1, 6800), (2, 80, 6800), (2,), (2, 80), (2, 80, 6800)]
-            input_names = ["x", "mask", "mu", "t", "spks", "cond"]
-        case "cosyvoice2_stepaudio_stream":
-            opt_btz = max_btz = 1 * 2
-            min_shapes = [(2, 80, 4), (2, 80, 4), (2, 80, 4), (2,), (2, 80), (16, 2, 1024, 2), (16, 2, 8, 0, 128)]
-            opt_shapes = [
-                (opt_btz, 80, 500),
-                (opt_btz, 80, 500),
-                (opt_btz, 80, 500),
-                (opt_btz,),
-                (opt_btz, 80),
-                (16, opt_btz, 1024, 2),
-                (16, opt_btz, 8, 100, 128),
-            ]
-            max_shapes = [
-                (max_btz, 80, 3000),
-                (max_btz, 80, 3000),
-                (max_btz, 80, 3000),
-                (max_btz,),
-                (max_btz, 80),
-                (16, max_btz, 1024, 2),
-                (16, max_btz, 8, 1000, 128),
-            ]
-            input_names = ["x", "mu", "cond", "t", "spks", "cnn_cache", "att_cache"]
-        case "cosyvoice2_stepaudio_whole":
-            opt_btz, max_btz = 2 * 2, 2 * 16
-            min_shapes = [(2, 80, 4), (2, 1, 4), (2, 80, 4), (2, 80, 4), (2,), (2, 80)]
-            opt_shapes = [
-                (opt_btz, 80, 500),
-                (opt_btz, 1, 500),
-                (opt_btz, 80, 500),
-                (opt_btz, 80, 500),
-                (opt_btz,),
-                (opt_btz, 80),
-            ]
-            max_shapes = [
-                (max_btz, 80, 3000),
-                (max_btz, 1, 3000),
-                (max_btz, 80, 3000),
-                (max_btz, 80, 3000),
-                (max_btz,),
-                (max_btz, 80),
-            ]
-            input_names = ["x", "mask", "mu", "cond", "t", "spks"]
+def get_flow_decoder_estimator_input_shapes():
+    min_btz, opt_btz, max_btz = 2 * 1, 2 * 1, 2 * 1
+    min_shapes = [(min_btz, 80, 4), (min_btz, 1, 4), (min_btz, 80, 4), (min_btz,), (min_btz, 80), (min_btz, 80, 4)]
+    opt_shapes = [(opt_btz, 80, 193), (opt_btz, 1, 193), (opt_btz, 80, 193), (opt_btz,), (opt_btz, 80), (opt_btz, 80, 193)]
+    max_shapes = [(max_btz, 80, 6800), (max_btz, 1, 6800), (max_btz, 80, 6800), (max_btz,), (max_btz, 80), (max_btz, 80, 6800)]
+    input_names = ["x", "mask", "mu", "t", "spks", "cond"]
     return zip(input_names, min_shapes, opt_shapes, max_shapes)
 
 
@@ -187,7 +158,7 @@ def simplify_onnx(onnx_path):
     try:
         simplified_model, check = onnxsim.simplify(orig_model)
     except Exception as e:
-        match = re.search("ir_version [0-9]+ is higher than the checker's \(([0-9]+)\)", str(e))
+        match = re.search(r"ir_version [0-9]+ is higher than the checker's \(([0-9]+)\)", str(e))
         if match:
             ir_version = int(match.group(1))
             logger.info(f"Downgrade `ir_version` to {ir_version} and continue simplification.")
@@ -294,7 +265,7 @@ def convert_onnx_to_trt(
     trt_path: str,
     input_shapes,
     dtype: str,
-    workspace_size=8,
+    workspace_size=4,
     optimization_level=3,
     timing_cache_path=None,
     set_layer_precision=None,
@@ -338,7 +309,7 @@ def convert_onnx_to_trt(
         config.set_flag(trt.BuilderFlag.FP16)
     elif dtype == "bf16":
         config.set_flag(trt.BuilderFlag.BF16)
-    elif dtype == "tf32":
+    elif dtype == "fp32":
         config.set_flag(trt.BuilderFlag.TF32)
 
     # set layer precision
@@ -380,3 +351,94 @@ def convert_onnx_to_trt(
             f.write(updated_cache.serialize())
 
     logger.info(f"Succesfully convert [{plan.nbytes / (1024**2):.2f} MB].")
+
+
+class CudaCacheCleaner:
+    def __init__(
+        self,
+        delay: float = 2.0,  # 防抖延迟（秒）
+        auto_clean_interval: float | None = 300.0,  # 自动定期清理间隔
+        min_reclaimable_gb: float = 0.0,  # 触发清理的可回收显存阈值 (GB)
+        device: int | str | torch.device = "cuda",
+        enabled: bool = True,
+    ):
+        self.delay = delay
+        self.auto_clean_interval = auto_clean_interval
+        self.min_reclaimable_bytes = int(min_reclaimable_gb * (1024**3))
+        self.device = torch.device(device) if isinstance(device, (int, str)) else device
+        self.enabled = enabled
+
+        self.lock = threading.Lock()
+        self._executing_count = 0
+
+        self.timer: threading.Timer | None = None
+        self._auto_thread: threading.Thread | None = None
+        self._stop_event = threading.Event()
+
+        if self.auto_clean_interval and self.auto_clean_interval > 0:
+            self.start_auto_cleanup(self.auto_clean_interval)
+
+    @contextmanager
+    def track(self):
+        self._executing_count += 1
+        try:
+            yield
+        finally:
+            self._executing_count = max(0, self._executing_count - 1)
+
+    def empty_cache(self):
+        if self.enabled:
+            with self.lock:
+                self._cancel_timer()
+                timer = threading.Timer(self.delay, self._execute_cleanup)
+                timer.daemon = True
+                self.timer = timer
+                timer.start()
+
+    def _cancel_timer(self):
+        if self.timer is not None:
+            self.timer.cancel()
+            self.timer = None
+
+    def _execute_cleanup(self):
+        if not torch.cuda.is_available():
+            return
+
+        if self._executing_count > 0:
+            return
+
+        reserved = torch.cuda.memory_reserved(self.device)
+        allocated = torch.cuda.memory_allocated(self.device)
+        if (reserved - allocated) < self.min_reclaimable_bytes:
+            return
+
+        gc.collect()
+        torch.cuda.empty_cache()
+
+    def start_auto_cleanup(self, interval: float):
+        if not self.enabled:
+            return
+
+        self.stop_auto_cleanup()
+        self.auto_clean_interval = interval
+        self._stop_event.clear()
+
+        def _loop():
+            while not self._stop_event.wait(timeout=self.auto_clean_interval):
+                self.empty_cache()
+
+        self._auto_thread = threading.Thread(target=_loop, daemon=True)
+        self._auto_thread.start()
+
+    def stop_auto_cleanup(self):
+        self._stop_event.set()
+        if self._auto_thread:
+            timeout = (self.auto_clean_interval or 1.0) + 3.0
+            self._auto_thread.join(timeout=timeout)
+        self._auto_thread = None
+
+    def stop(self):
+        self.stop_auto_cleanup()
+        if self.timer is not None:
+            self.timer.cancel()
+            self.timer = None

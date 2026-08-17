@@ -6,9 +6,6 @@ from pathlib import Path
 from dataclasses import dataclass
 
 
-os.environ["RAY_ACCEL_ENV_VAR_OVERRIDE_ON_ZERO"] = "0"
-
-
 ROOT = Path(__file__).parents[2]
 # TTS 版本
 VERSION = os.getenv("VERSION", "cosyvoice2").lower()
@@ -22,54 +19,67 @@ FRONTEND_MODE = os.getenv("FRONTEND_MODE", "wetext")
 TTSFRD_RESOURCE_PATH = str(os.getenv("TTSFRD_RESOURCE_PATH", ROOT / "assets" / "CosyVoice-ttsfrd" / "resource"))
 # NovaSR 模型文件路径，用于音频超分
 NOVASR_MODEL_PATH = str(os.getenv("NOVASR_MODEL_PATH", ROOT / "assets" / "novasr_v2.bin"))
-
-
+# 默认音色缓存路径
+DEFAULT_SPEAKER_CACHE = str(os.getenv("DEFAULT_SPEAKER_CACHE", ROOT / "assets" / "default_speaker_cache.pt"))
 # 等待超时时间
-WAITING_TIMEOUT = float(os.getenv("WAITING_TIMEOUT", 120.0))
-# 额外配置 ray 的可用显卡
-RAY_CUDA_VISIBLE_DEVICES = os.getenv("RAY_CUDA_VISIBLE_DEVICES", os.getenv("CUDA_VISIBLE_DEVICES", "0"))
+WAITING_TIMEOUT = float(os.getenv("WAITING_TIMEOUT", "120.0"))
+# Ray 最大并行请求数
+RAY_MAX_ONGOING_REQUESTS = int(os.getenv("RAY_MAX_ONGOING_REQUESTS", "100"))
+# CUDA Cache 清理
+USE_CUDA_CACHE_CLEANER = bool(int(os.getenv("USE_CUDA_CACHE_CLEANER", "1")))
+CUDA_CACHE_CLEAN_DELAY = float(os.getenv("RAY_MAX_ONGOING_REQUESTS", "2.0"))
+CUDA_CACHE_CLEAN_INTERVAL = float(os.getenv("RAY_MAX_ONGOING_REQUESTS", "300.0"))
 
 
 #######################
 #### Flow 相关配置 ####
 #######################
 # 限制将 flow onnx 转换为 trt 时使用的 GPU 显存大小
-ONNX2TRT_WORKSPACE_SIZE = int(os.getenv("ONNX2TRT_WORKSPACE_SIZE", 2))
+FLOW_TRT_WORKSPACE_SIZE = int(os.getenv("FLOW_TRT_WORKSPACE_SIZE", "2"))
 # 根据 GPU 显存大小量及性能设置合适的 flow decoder estimator 数量
-FLOW_ESTIMATOR_COUNT = int(os.getenv("FLOW_ESTIMATOR_COUNT", 1))
+NUM_FLOW_ESTIMATORS = int(os.getenv("NUM_FLOW_ESTIMATORS", "1"))
 # flow model 使用的 gpu 大小
-FLOW_ACTOR_NUM_GPUS = float(os.getenv("FLOW_ACTOR_NUM_GPUS", 0.15))
+FLOW_NUM_GPUS = float(os.getenv("FLOW_NUM_GPUS", "0.15"))
 # flow model 的实例数量
-FLOW_ACTOR_COUNT = int(os.getenv("FLOW_ACTOR_COUNT", 1))
+NUM_FLOW_ACTORS = int(os.getenv("NUM_FLOW_ACTORS", "1"))
 # flow model 推理精度
-FLOW_DTYPE = os.getenv("FLOW_DTYPE", "tp16").lower()
+FLOW_DTYPE = os.getenv("FLOW_DTYPE", "fp16").lower()
 # flow model 启用 jit 加速 encoder 推理，仅 `VERSION=cosyvoice2` 支持
 FLOW_JIT = bool(int(os.getenv("FLOW_JIT", "0")))
 # flow model 启用 tensortrt 加速 decoder estimator 推理
 FLOW_TRT = bool(int(os.getenv("FLOW_TRT", "1")))
 # flow model 启用 compile 加速推理
 FLOW_COMPILE = bool(int(os.getenv("FLOW_COMPILE", "1")))
+FLOW_PROMPT_CACHE_SIZE = int(os.getenv("FLOW_PROMPT_CACHE_SIZE", "10"))
 
 
 #######################
 #### HIFT 相关配置 ####
 #######################
 # hift model 使用的 gpu 大小
-HIFT_ACTOR_NUM_GPUS = float(os.getenv("HIFT_ACTOR_NUM_GPUS", 0.05))
+HIFT_NUM_GPUS = float(os.getenv("HIFT_NUM_GPUS", "0.05"))
 # hift model 的实例数量
-HIFT_ACTOR_COUNT = int(os.getenv("HIFT_ACTOR_COUNT", 1))
+NUM_HIFT_ACTORS = int(os.getenv("NUM_HIFT_ACTORS", "1"))
+# hift model 启用 tensortrt 加速推理
+HIFT_TRT = bool(int(os.getenv("HIFT_TRT", "0")))
 # hift model 启用 compile 加速推理
 HIFT_COMPILE = bool(int(os.getenv("HIFT_COMPILE", "1")))
-# 最大并发数
-ACTOR_MAX_CONCURRENCY = int(os.getenv("ACTOR_MAX_CONCURRENCY", 100))
 
 
 ######################
 #### LLM 相关配置 ####
 ######################
+LLM_NUM_GPUS = float(os.getenv("LLM_NUM_GPUS", 0.5))
 # llm model 引擎模式，支持 `sglang` 和 `vllm`
 LLM_ENGINE_MODE = os.getenv("LLM_ENGINE_MODE", "sglang")
-LLM_MAX_NUM_SILENT_TOKENS = int(os.getenv("LLM_MAX_NUM_SILENT_TOKENS", "5"))
+LLM_MAX_NUM_SILENT_TOKENS = int(os.getenv("LLM_MAX_NUM_SILENT_TOKENS", 5))
+
+
+os.environ["RAY_ACCEL_ENV_VAR_OVERRIDE_ON_ZERO"] = "0"
+os.environ["RAY_CHDIR_TO_TRIAL_DIR"] = "0"
+os.environ["RAY_SERVE_RUN_SYNC_IN_THREADPOOL"] = "1"
+os.environ["TORCHINDUCTOR_FX_GRAPH_CACHE"] = "1"
+os.environ["TORCHINDUCTOR_CACHE_DIR"] = os.path.join(COMPILATION_CACHE_DIR, "torch_inductor")
 
 
 class CosyVoiceInputType(enum.Enum):
@@ -92,6 +102,7 @@ class Prompt:
 
 @dataclass
 class Params:
+    id: str
     stream: bool
     speed: float = 1.0
     flow_window_size: int = 500

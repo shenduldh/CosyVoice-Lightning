@@ -31,29 +31,13 @@ from .common import VERSION, TTSFRD_RESOURCE_PATH, FRONTEND_MODE, NOVASR_MODEL_P
 
 
 def get_mel_encoder():
-    if VERSION == "cosyvoice3":
+    if VERSION.startswith("cosyvoice3"):
         mel_encoder = lambda y: mel_spectrogram(
-            y,
-            n_fft=1920,
-            num_mels=80,
-            sampling_rate=24000,
-            hop_size=480,
-            win_size=1920,
-            fmin=0,
-            fmax=None,
-            center=False,
+            y, n_fft=1920, num_mels=80, sampling_rate=24000, hop_size=480, win_size=1920, fmin=0, fmax=None, center=False
         )
     else:
         mel_encoder = lambda y: mel_spectrogram(
-            y,
-            n_fft=1920,
-            num_mels=80,
-            sampling_rate=24000,
-            hop_size=480,
-            win_size=1920,
-            fmin=0,
-            fmax=8000,
-            center=False,
+            y, n_fft=1920, num_mels=80, sampling_rate=24000, hop_size=480, win_size=1920, fmin=0, fmax=8000, center=False
         )
     return mel_encoder, 24000
 
@@ -61,21 +45,15 @@ def get_mel_encoder():
 def get_tokenizer():
     qwen_config_path = os.path.join(os.path.dirname(__file__), "llm", "qwen2_config")
 
-    if VERSION == "cosyvoice3":
-        return get_qwen_tokenizer(
-            qwen_config_path, skip_special_tokens=True, version="cosyvoice3"
-        )
-    return get_qwen_tokenizer(
-        qwen_config_path, skip_special_tokens=True, version="cosyvoice2"
-    )
+    if VERSION.startswith("cosyvoice3"):
+        return get_qwen_tokenizer(qwen_config_path, skip_special_tokens=True, version="cosyvoice3")
+    return get_qwen_tokenizer(qwen_config_path, skip_special_tokens=True, version="cosyvoice2")
 
 
 def get_speech_tokenizer(model_dir, device):
     speech_tokenizer_path = os.path.join(
         model_dir,
-        "speech_tokenizer_v3.onnx"
-        if VERSION == "cosyvoice3"
-        else "speech_tokenizer_v2.onnx",
+        "speech_tokenizer_v3.onnx" if VERSION.startswith("cosyvoice3") else "speech_tokenizer_v2.onnx",
     )
 
     option = onnxruntime.SessionOptions()
@@ -84,13 +62,7 @@ def get_speech_tokenizer(model_dir, device):
     speech_tokenizer = onnxruntime.InferenceSession(
         speech_tokenizer_path,
         sess_options=option,
-        providers=[
-            (
-                "CUDAExecutionProvider"
-                if torch.cuda.is_available()
-                else "CPUExecutionProvider"
-            )
-        ],
+        providers=[("CUDAExecutionProvider" if torch.cuda.is_available() else "CPUExecutionProvider")],
     )
 
     # speech_tokenizer = s3tokenizer.load_model(speech_tokenizer_path).to(device).eval()
@@ -104,25 +76,19 @@ def get_speaker_encoder(model_dir):
     option.intra_op_num_threads = 1
 
     speaker_encoder_path = os.path.join(model_dir, "campplus.onnx")
-    speaker_encoder = onnxruntime.InferenceSession(
-        speaker_encoder_path, sess_options=option, providers=["CPUExecutionProvider"]
-    )
+    speaker_encoder = onnxruntime.InferenceSession(speaker_encoder_path, sess_options=option, providers=["CPUExecutionProvider"])
 
     return speaker_encoder, 16000
 
 
 class CosyVoiceFrontEnd:
     def __init__(self, model_dir, allowed_special="all"):
-        self.device = (
-            torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
-        )
+        self.device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
 
         self.tokenizer = get_tokenizer()
         self.mel_encoder, self.mel_feature_sr = get_mel_encoder()
         self.speaker_encoder, self.speaker_embedding_sr = get_speaker_encoder(model_dir)
-        self.speech_tokenizer, self.speech_token_sr = get_speech_tokenizer(
-            model_dir, self.device
-        )
+        self.speech_tokenizer, self.speech_token_sr = get_speech_tokenizer(model_dir, self.device)
 
         self.allowed_special = allowed_special
         self.use_ttsfrd = FRONTEND_MODE == "ttsfrd"
@@ -130,18 +96,14 @@ class CosyVoiceFrontEnd:
             import ttsfrd
 
             self.ttsfrd = ttsfrd.TtsFrontendEngine()
-            assert self.ttsfrd.initialize(TTSFRD_RESOURCE_PATH) is True, (
-                "Failed to initialize ttsfrd resource."
-            )
+            assert self.ttsfrd.initialize(TTSFRD_RESOURCE_PATH) is True, "Failed to initialize ttsfrd resource."
             self.ttsfrd.set_lang_type("pinyinvg")
         else:
             import wetext
 
             self.wetext = wetext.Normalizer()
             self.inflect_parser = inflect.engine()
-            self.tokenizer_encode_fn = partial(
-                self.tokenizer.encode, allowed_special=allowed_special
-            )
+            self.tokenizer_encode_fn = partial(self.tokenizer.encode, allowed_special=allowed_special)
 
         if NOVASR_MODEL_PATH is not None:
             self.upsampler = FastSR(ckpt_path=NOVASR_MODEL_PATH, half=False)
@@ -168,15 +130,11 @@ class CosyVoiceFrontEnd:
         elif isinstance(text, AsyncGenerator):
             return self.__ett_async_generator(text)
         else:
-            token_ids = self.tokenizer.encode(
-                text, allowed_special=self.allowed_special
-            )
+            token_ids = self.tokenizer.encode(text, allowed_special=self.allowed_special)
             return token_ids
 
     def extract_speech_tokens(self, audio_tensor, sr: int):
-        assert audio_tensor.shape[1] / sr <= 30, (
-            "Do not support extract speech tokens for audio longer than 30s."
-        )
+        assert audio_tensor.shape[1] / sr <= 30, "Do not support extract speech tokens for audio longer than 30s."
         if sr != self.speech_token_sr:
             audio_tensor = self.resample(audio_tensor, sr, self.speech_token_sr)
 
@@ -199,23 +157,17 @@ class CosyVoiceFrontEnd:
         )
         speech_tokens = speech_tokens[0].flatten().tolist()
         speech_tokens = torch.tensor([speech_tokens], dtype=torch.int32).cpu()
-        speech_tokens_lens = torch.tensor(
-            [speech_tokens.shape[1]], dtype=torch.int32
-        ).cpu()
+        speech_tokens_lens = torch.tensor([speech_tokens.shape[1]], dtype=torch.int32).cpu()
         return speech_tokens, speech_tokens_lens
 
     def extract_spk_embedding(self, audio_tensor, sr: int):
         if sr != self.speaker_embedding_sr:
             audio_tensor = self.resample(audio_tensor, sr, self.speaker_embedding_sr)
 
-        feat = kaldi.fbank(
-            audio_tensor, num_mel_bins=80, dither=0, sample_frequency=16000
-        )
+        feat = kaldi.fbank(audio_tensor, num_mel_bins=80, dither=0, sample_frequency=16000)
         feat = feat - feat.mean(dim=0, keepdim=True)
         input_name = self.speaker_encoder.get_inputs()[0].name
-        embedding = self.speaker_encoder.run(
-            None, {input_name: feat.unsqueeze(dim=0).cpu().numpy()}
-        )
+        embedding = self.speaker_encoder.run(None, {input_name: feat.unsqueeze(dim=0).cpu().numpy()})
         embedding = torch.from_numpy(embedding[0]).cpu()
         return embedding
 
@@ -228,9 +180,7 @@ class CosyVoiceFrontEnd:
         mels_lens = torch.tensor([mels.shape[1]], dtype=torch.int32).cpu()
         return mels, mels_lens
 
-    def normalize_text(
-        self, text, split=False, enabled=True
-    ) -> AsyncGenerator | str | list[str] | None:
+    def normalize_text(self, text, split=False, enabled=True) -> AsyncGenerator | str | list[str] | None:
         if isinstance(text, AsyncGenerator):
             return text
 
@@ -286,9 +236,7 @@ class CosyVoiceFrontEnd:
         audio_tensor = audio_tensor.mean(dim=0, keepdim=True)  # to mono
 
         # remove silence
-        audio_tensor, _ = librosa.effects.trim(
-            audio_tensor, top_db=60, frame_length=440, hop_length=220
-        )
+        audio_tensor, _ = librosa.effects.trim(audio_tensor, top_db=60, frame_length=440, hop_length=220)
         # audio_tensor = torchaudio.functional.vad(audio_tensor, sr)
 
         # concat tail silence
@@ -315,12 +263,10 @@ class CosyVoiceFrontEnd:
 
         return audio_tensor, sr
 
-    def resample(
-        self, audio_tensor, orig_sr, target_sr, resampling_method="sinc_interp_hann"
-    ):
-        audio_tensor = torchaudio.transforms.Resample(
-            orig_freq=orig_sr, new_freq=target_sr, resampling_method=resampling_method
-        )(audio_tensor)
+    def resample(self, audio_tensor, orig_sr, target_sr, resampling_method="sinc_interp_hann"):
+        audio_tensor = torchaudio.transforms.Resample(orig_freq=orig_sr, new_freq=target_sr, resampling_method=resampling_method)(
+            audio_tensor
+        )
         return audio_tensor
 
     def save_audio(self, saved_path, audio_ndarray, sample_rate):

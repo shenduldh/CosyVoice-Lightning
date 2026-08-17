@@ -2,16 +2,18 @@
 
 ## Introduction
 
-参考 [CosyVoice](https://github.com/FunAudioLLM/CosyVoice) 修改的 Websocket API，支持以下特性：
+参考 [CosyVoice](https://github.com/FunAudioLLM/CosyVoice) 修改的 Websocket TTS API，支持以下特性：
 
-1. 使用 `vLLM` 或 `SGLang` 加速推理；
+1. 支持多种加速方法（TensorRT、vLLM、SGLang 等），首帧延迟低至 ~250ms；
 2. 支持流式输入和流式输出；
 3. 支持多格式音频（opus、pcm、wav、mp3、flac、aac、m4a、wav，默认是 wav）和多采样率输出；
-4. 支持克隆音色；
+4. 支持克隆音色，以及保存和加载已克隆音色；
 5. 支持使用指令文本控制语音生成；
-6. 支持保存和加载已克隆音色。
+6. 采用滑动窗口的方式衔接上下文，理论上支持无限长的文本生成。
 
 ## Updates
+
+- [2026/08/17] 新增 `CosyVoice 3` Flow 流式推理；支持 Flow 和 HiFT 的 `Torch-TensorRT` 编译；首帧延迟减低到 ~250ms。
 
 - [2026/03/23] 新增 `CosyVoice 3`；支持超长文本生成；使用 [NovaSR](https://github.com/ysharma3501/NovaSR) 提升克隆质量。
 
@@ -49,31 +51,37 @@
 
   https://github.com/user-attachments/assets/61dda736-0e2f-4398-9207-b802f1b9ede4
 
-## TTFF
+## Metrics
 
-> 以下测试使用 `SGLang` 作为后端。
+- CosyVoice2 短文本
 
-- 单句话
+  <img src="assets/mttff_cv2_short.png" width="60%">
 
-  <img src="assets/single_sentence_mttff.png" width="60%">
+- CosyVoice3 短文本
 
-- 短段落
+  <img src="assets/mttff_cv3_short.png" width="60%">
 
-  <img src="assets/short_paragraph_mttff.png" width="60%">
+- CosyVoice3 长文本
 
-## Usage
+  <img src="assets/mttff_cv3_long.png" width="60%">
 
-### Setup
+- CosyVoice3 混合文本
+
+  <img src="assets/mttff_cv3_mixed.png" width="60%">
+
+## Setup
 
 1. 安装 `Python` 环境和依赖
 
    ```bash
    conda create -n cosyvoice -y python=3.11
    conda activate cosyvoice
-   # 若使用 vllm 版本，执行命令：
-   pip install -r requirements/vllm.txt
-   # 若使用 sglang 版本，执行命令：
-   pip install -r requirements/sglang.txt
+   # 使用 torch2.7.1+vllm 版本，执行命令：
+   pip install -r requirements/torch2.7.1/vllm.txt
+   # 使用 torch2.7.1+sglang 版本，执行命令：
+   pip install -r requirements/torch2.7.1/vllm.txt
+   # 使用 torch2.9.1+vllm 版本（支持 Torch-TensorRT 编译 FLow 和 HiFT），执行命令：
+   pip install -r requirements/torch2.9.1/vllm.txt
    ```
 
 2. 安装 `sox` 库
@@ -96,6 +104,7 @@
    pip install ttsfrd_dependency-0.1-py3-none-any.whl
    pip install ttsfrd-0.4.2-cp310-cp310-linux_x86_64.whl
    ```
+
    编辑环境参数文件 `api/.env` 中的 `TTSFRD_RESOURCE_PATH` 为 `CosyVoice-ttsfrd/resource` 的路径。
 
    或者安装其他版本的 ttsfrd：
@@ -108,24 +117,30 @@
    ```
 
 4. 下载模型文件
-
    - 从 [iic/CosyVoice2-0.5B - ModelScope](https://www.modelscope.cn/models/iic/CosyVoice2-0.5B) 或 [FunAudioLLM/Fun-CosyVoice3-0.5B-2512](https://www.modelscope.cn/models/FunAudioLLM/Fun-CosyVoice3-0.5B-2512) 下载模型文件。
 
    - 编辑 `api/.env` 中 TTS 模型文件的路径。
 
 5. 修改 CUDA 架构版本
+   - 使用 `python -c "import torch; print(torch.cuda.get_device_capability())` 查看你的 CUDA 架构版本。
 
-    - 使用 `python -c "import torch; print(torch.cuda.get_device_capability())` 查看你的 CUDA 架构版本。
+   - 修改 `api/.env` 和 `run_demo.sh` 中的 `TORCH_CUDA_ARCH_LIST` 为你的 CUDA 架构版本。比如上面命令的输出是 `(8, 9)`，则修改为 `TORCH_CUDA_ARCH_LIST=8.9`。
 
-    - 修改 `api/.env` 和 `run_demo.sh` 中的 `TORCH_CUDA_ARCH_LIST` 为你的 CUDA 架构版本。比如上面命令的输出是 `(8, 9)`，则修改为 `TORCH_CUDA_ARCH_LIST=8.9`。
+## Usage
 
-### API
+1. 启动 API 服务，由 Websocket 提供流式生成。具体接口参考 [API docs](api/README.md)。
 
-> 启动 API 服务，由 Websocket 提供流式生成。具体接口参考 [API docs](api/README.md)。
+   ```bash
+   sh run_server.sh
+   ```
 
-```bash
-cd api
-sh run_server.sh
-# 测试 API
-python test.py
-```
+2. 设置 DEBUG=1 后访问 `http(s)://ip:port/debug` 使用 webui。
+
+3. 测试和评估 API：
+
+   ```bash
+   # 测试 API
+   python test/test_tts.py
+   # 评估 TTFF 和 RTF
+   python test/test_tts.py --eval_ttff
+   ```

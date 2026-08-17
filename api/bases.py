@@ -62,6 +62,7 @@ class TTSStreamRequestParameters(BaseModel):
     instruct_text: Union[str | None] = Field(description="指令文本", default=None)
     slice_seconds: float = Field(description="最大输出切片长度", default=1.0)
     generation_params: GenerationParams = Field(description="生成配置", default_factory=GenerationParams)
+    max_text_length: int = Field(description="最大文本长度", default=1000)
 
 
 class TTSStreamRequestInput(BaseModel):

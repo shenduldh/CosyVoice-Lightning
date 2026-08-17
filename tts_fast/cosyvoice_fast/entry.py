@@ -1,3 +1,4 @@
+import traceback
 import os
 from typing import Optional, Union, Dict, List, Any, AsyncGenerator
 from collections import OrderedDict
@@ -7,10 +8,11 @@ import uuid
 import uvloop
 import queue
 import threading
+from loguru import logger
 
-from .pipeline import CosyVoicePipeline
+from .pipeline import get_synthesizer
 from .frontend import CosyVoiceFrontEnd
-from .common import VERSION, TTS_MODEL_DIR, CosyVoiceInputType, Prompt, Params
+from .common import VERSION, TTS_MODEL_DIR, DEFAULT_SPEAKER_CACHE, CosyVoiceInputType, Prompt, Params
 
 
 def async_to_sync_gen(async_generator: AsyncGenerator):
@@ -51,11 +53,14 @@ def tensor_to_list(t: torch.Tensor):
 
 class CosyVoiceEntry:
     def __init__(self):
-        self.synthesizer = CosyVoicePipeline(TTS_MODEL_DIR)
-        self.sample_rate = self.synthesizer.sample_rate
+        self.synthesizer, self.sample_rate = get_synthesizer()
         self.frontend = CosyVoiceFrontEnd(TTS_MODEL_DIR)
         self.speaker_cache = OrderedDict()
         self.set_decoration()
+
+        if os.path.exists(DEFAULT_SPEAKER_CACHE):
+            self.load_cache(DEFAULT_SPEAKER_CACHE)
+        logger.info(f"Successfully load speakers: {self.get_speakers()}")
 
     def save_cache(
         self,
@@ -170,7 +175,7 @@ class CosyVoiceEntry:
         return speaker_features
 
     def set_decoration(self):
-        if VERSION == "cosyvoice3":
+        if VERSION.startswith("cosyvoice3"):
             prompt_prefix = "You are a helpful assistant.<|endofprompt|>"
             prompt_suffix = ""
             instruct_prefix = "You are a helpful assistant. "
@@ -222,10 +227,11 @@ class CosyVoiceEntry:
 
     def async_request(
         self,
-        tts_text: Optional[Any],
-        prompt_audio: Optional[str],
-        prompt_text: Optional[str],
-        instruct_text: Optional[str],
+        request_id: Optional[str] = None,
+        tts_text: Optional[Any] = None,
+        prompt_audio: Optional[str] = None,
+        prompt_text: Optional[str] = None,
+        instruct_text: Optional[str] = None,
         speaker_id: Optional[str] = None,
         loudness=30.0,
         split_text=False,
@@ -237,9 +243,9 @@ class CosyVoiceEntry:
         if tts_text is None:
             return
 
-        params = Params(stream, **generation_params)
+        params = Params(id=request_id or uuid.uuid4().hex, stream=stream, **generation_params)
         input_generator = self.wrap_to_generator(tts_text, split_text, input_type)
-        output_generator = self.synthesizer.generate(input_generator=input_generator, prompt=prompt, params=params)
+        output_generator = self.synthesizer(input_generator=input_generator, prompt=prompt, params=params)
         return output_generator
 
     def request(self, *args, **kwargs):

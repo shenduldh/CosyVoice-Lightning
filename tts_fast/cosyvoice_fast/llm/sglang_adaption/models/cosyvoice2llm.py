@@ -4,10 +4,7 @@ from torch import nn
 from sglang.srt.distributed import get_pp_group
 from sglang.srt.layers.logits_processor import LogitsProcessor
 from sglang.srt.layers.quantization.base_config import QuantizationConfig
-from sglang.srt.layers.vocab_parallel_embedding import (
-    ParallelLMHead,
-    VocabParallelEmbedding,
-)
+from sglang.srt.layers.vocab_parallel_embedding import ParallelLMHead, VocabParallelEmbedding
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch, PPProxyTensors
 from sglang.srt.model_loader.weight_utils import default_weight_loader
 from sglang.srt.utils import add_prefix
@@ -65,9 +62,7 @@ class CosyVoice2LLM(nn.Module):
         )
 
         self.mixed_embedding = VocabParallelEmbedding(
-            num_embeddings=self.num_generation_tokens
-            + self.num_text_tokens
-            + self.num_special_tokens,
+            num_embeddings=self.num_generation_tokens + self.num_text_tokens + self.num_special_tokens,
             embedding_dim=self.hidden_size,
             quant_config=quant_config,
         )
@@ -94,15 +89,11 @@ class CosyVoice2LLM(nn.Module):
         )
 
         if self.pp_group.is_last_rank:
-            return self.logits_processor(
-                input_ids, hidden_states, self.llm_decoder, forward_batch
-            )
+            return self.logits_processor(input_ids, hidden_states, self.llm_decoder, forward_batch)
         else:
             return hidden_states
 
-    def convert_weights(
-        self, weights: Iterable[Tuple[str, torch.Tensor]]
-    ) -> Iterable[Tuple[str, torch.Tensor]]:
+    def convert_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]) -> Iterable[Tuple[str, torch.Tensor]]:
         for name, loaded_weight in weights:
             if name.startswith(
                 (
@@ -148,16 +139,12 @@ class CosyVoice2LLM(nn.Module):
                     continue
                 if name in params_dict.keys():
                     param = params_dict[name]
-                    weight_loader = getattr(
-                        param, "weight_loader", default_weight_loader
-                    )
+                    weight_loader = getattr(param, "weight_loader", default_weight_loader)
                     weight_loader(param, loaded_weight)
 
         device = self.speech_embedding.weight.device
         speech_embeds = self.speech_embedding.weight
-        text_embeds = self.model.embed_tokens(
-            torch.arange(self.num_text_tokens).to(device)
-        )
+        text_embeds = self.model.embed_tokens(torch.arange(self.num_text_tokens).to(device))
         special_embeds = self.llm_embedding.weight
         concatenated = torch.cat((speech_embeds, text_embeds, special_embeds))
         self.mixed_embedding.weight_loader(self.mixed_embedding.weight, concatenated)

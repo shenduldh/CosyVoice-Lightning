@@ -1,13 +1,11 @@
 import os
-from typing import Optional
 import zipfile
-from fastapi import FastAPI, APIRouter
+from fastapi import FastAPI, APIRouter, HTTPException
 from fastapi.responses import FileResponse
 from pathlib import Path
 from starlette.requests import Request
 from starlette.templating import Jinja2Templates
 from starlette.staticfiles import StaticFiles
-from typing import List
 from utils import path_to_root
 import hashlib
 import shutil
@@ -28,9 +26,7 @@ def debug_print(msg):
     print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | Debug - {msg}")
 
 
-def clean_expired(
-    root: Path, max_hours=24 * 14, date=None, this_dir: Optional[Path] = None
-):
+def clean_expired(root: Path, max_hours=24 * 14, date=None, this_dir: Path | None = None):
     if date is None:
         date = datetime.now()
 
@@ -46,9 +42,7 @@ def clean_expired(
         year_month, day, hour, minute_second = this_dir.relative_to(root).parts
         year, month = year_month.split("-")
         minute, second = minute_second.split("_")[0].split("-")
-        this_date = datetime(
-            int(year), int(month), int(day), int(hour), int(minute), int(second)
-        )
+        this_date = datetime(int(year), int(month), int(day), int(hour), int(minute), int(second))
         hours_diff = (date - this_date).total_seconds() // 3600
         if hours_diff > max_hours:
             shutil.rmtree(this_dir, ignore_errors=True)
@@ -97,8 +91,9 @@ class Debugger:
     def __init__(self, enabled=False):
         self.templates = Jinja2Templates(path_to_root("api", "debug", "templates"))
         host_id = f"{os.environ['HOST']}_{os.environ['PORT']}"
-        self.saved_path = Path(path_to_root("api", "debug", "saved", host_id))
-        self.temp_path = Path(path_to_root("api", "debug", "temp", host_id))
+        self.root = Path(path_to_root("debug_saved", host_id))
+        self.saved_path = self.root / "results"
+        self.temp_path = self.root / "temp"
         self.static_path = path_to_root("api", "debug", "static")
         self.data = defaultdict(lambda: {"chunks": [], "text": []})
         self.enabled = enabled
@@ -107,7 +102,7 @@ class Debugger:
         if self.enabled:
             self.data[req_id]["chunks"].append(audio_chunk)
 
-    def add_text(self, req_id: str, text_clips: List[str]):
+    def add_text(self, req_id: str, text_clips: list[str]):
         if self.enabled:
             self.data[req_id]["text"] += text_clips
 
@@ -117,9 +112,7 @@ class Debugger:
             day = tts_task.date.strftime("%d")
             hour = tts_task.date.strftime("%H")
             time = tts_task.date.strftime("%M-%S")
-            saved_dir = os.path.join(
-                self.saved_path, year_month, day, hour, f"{time}_{req_id}"
-            )
+            saved_dir = os.path.join(self.saved_path, year_month, day, hour, f"{time}_{req_id}")
             os.makedirs(saved_dir, exist_ok=True)
 
             if len(self.data[req_id]["chunks"]) > 0:
@@ -132,16 +125,24 @@ class Debugger:
                     "instruct_text": tts_task.params.instruct_text,
                     "resample_rate": tts_task.params.sample_rate,
                     "audio_format": tts_task.params.audio_format,
-                    "response_seconds": (
-                        datetime.now() - tts_task.date
-                    ).total_seconds(),
+                    "response_seconds": (datetime.now() - tts_task.date).total_seconds(),
                     "tts_text": self.data[req_id]["text"],
                 }
                 saved_path = os.path.join(saved_dir, "info.json")
                 with open(saved_path, "w", encoding="utf-8") as f:
                     json.dump(info, f, ensure_ascii=False, indent=4)
+            self.discard(req_id)
 
-    def get_file_tree(self, dir_path: Optional[Path] = None, level=0):
+    def discard(self, req_id: str):
+        self.data.pop(req_id, None)
+
+    def _resolve_saved_path(self, target: str) -> Path:
+        resolved = (self.saved_path / target).resolve()
+        if not resolved.is_relative_to(self.saved_path.resolve()):
+            raise HTTPException(status_code=404, detail="Path not found")
+        return resolved
+
+    def get_file_tree(self, dir_path: Path | None = None, level=0):
         this_dir = self.saved_path if dir_path is None else dir_path
         tree = {
             "name": this_dir.name,
@@ -162,6 +163,7 @@ class Debugger:
                         "id": uuid.uuid4().hex,
                         "type": "file",
                         "level": level + 1,
+                        "size": child.stat().st_size,
                         "dl_href": f"{self.prefix}/dl/file/{child.relative_to(self.saved_path)}",
                     }
                 )
@@ -172,7 +174,6 @@ class Debugger:
         if self.enabled:
             os.makedirs(self.temp_path, exist_ok=True)
             os.makedirs(self.saved_path, exist_ok=True)
-
             self.clean_event = multiprocessing.Event()
             self.clean_process = multiprocessing.Process(
                 target=clean_job,
@@ -187,13 +188,9 @@ class Debugger:
             self.clean_process.join(timeout=10)
             if self.clean_process.is_alive():
                 self.clean_process.terminate()
+            shutil.rmtree(self.root, ignore_errors=True)
 
-            shutil.rmtree(self.temp_path, ignore_errors=True)
-            shutil.rmtree(self.saved_path, ignore_errors=True)
-
-    def patch(
-        self, app: FastAPI, router_prefix="/debug", static_routing_name="debug_static"
-    ):
+    def patch(self, app: FastAPI, router_prefix="/debug", static_routing_name="debug_static"):
         if self.enabled:
             router = APIRouter(prefix=router_prefix)
             self.add_routes(router)
@@ -208,7 +205,7 @@ class Debugger:
     def add_routes(self, router: APIRouter):
         @router.get("/")
         async def index(request: Request):
-            return self.templates.TemplateResponse("index.html", {"request": request})
+            return self.templates.TemplateResponse(request, "index.html")
 
         @router.get("/files")
         async def files():
@@ -216,7 +213,7 @@ class Debugger:
 
         @router.get("/dl/file/{file_name:path}")
         async def download_file(file_name: str):
-            file_path = self.saved_path / file_name
+            file_path = self._resolve_saved_path(file_name)
             return FileResponse(file_path, filename=file_path.name)
 
         @router.get("/dl/folder/{folder_name:path}")
@@ -224,7 +221,7 @@ class Debugger:
             md5 = hashlib.md5()
             md5.update(str(folder_name).encode())
             zip_path = str(self.temp_path / md5.hexdigest()) + ".zip"
-            folder_path = self.saved_path / folder_name
+            folder_path = self._resolve_saved_path(folder_name)
 
             if not os.path.exists(zip_path):
                 zip_folder(str(folder_path), zip_path)
@@ -237,7 +234,8 @@ class Debugger:
 
         @router.get("/del/{target_path:path}")
         async def delete(target_path: str):
-            shutil.rmtree(self.saved_path / target_path, ignore_errors=True)
+            target = self._resolve_saved_path(target_path)
+            shutil.rmtree(target, ignore_errors=True)
             if not os.path.exists(self.saved_path):
                 os.makedirs(self.saved_path, exist_ok=True)
             return {"status": "ok"}

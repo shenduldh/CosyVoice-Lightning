@@ -1,17 +1,15 @@
+import time
+import asyncio
 import os
 import shutil
-from loguru import logger
 from typing import List, AsyncGenerator
-import asyncio
+from ray import serve
 from collections import deque
+import traceback
+import zmq
+import zmq.asyncio
 
-from ..common import VERSION, LLM_ENGINE_MODE, Prompt, Params, LLM_MAX_NUM_SILENT_TOKENS
-
-
-if LLM_ENGINE_MODE == "sglang":
-    from .sglang_adaption.engine import get_generation_fn
-elif LLM_ENGINE_MODE == "vllm":
-    from .vllm_adaption.engine import get_generation_fn
+from ..common import Prompt, Params
 
 
 def cache_input(generator_or_list: AsyncGenerator | List[int]):
@@ -29,15 +27,27 @@ def cache_input(generator_or_list: AsyncGenerator | List[int]):
     return cached_generator(), cached
 
 
+@serve.deployment
 class LLMWrapper:
-    def __init__(self, model_dir: str, mix_ratio: List[int] = [5, 15]):
+    def __init__(
+        self,
+        model_dir: str,
+        cache_dir: str,
+        version: str,
+        engine_mode: str,
+        max_num_silent_tokens: int = 5,
+        mix_ratio: List[int] = [5, 15],
+    ):
         if not os.path.exists(os.path.join(model_dir, "config.json")):
             qwen2_config = os.path.join(os.path.dirname(os.path.abspath(__file__)), "qwen2_config")
             shutil.copytree(qwen2_config, model_dir, dirs_exist_ok=True)
 
-        self.mix_ratio = mix_ratio
-        self.model_name = "cosyvoice3llm" if VERSION == "cosyvoice3" else "cosyvoice2llm"
-        self.generate = get_generation_fn(model_dir, model_name=self.model_name, force_registration=True)
+        self.model_name = "cosyvoice3llm" if version.startswith("cosyvoice3") else "cosyvoice2llm"
+        if engine_mode == "sglang":
+            from .sglang_adaption.engine import get_generation_fn
+        elif engine_mode == "vllm":
+            from .vllm_adaption.engine import get_generation_fn
+        self.generate = get_generation_fn(model_dir, cache_dir, model_name=self.model_name, force_registration=True)
 
         if self.model_name == "cosyvoice2llm":
             self.num_text_tokens = 151936  # Qwen2 vocab size
@@ -60,9 +70,10 @@ class LLMWrapper:
             self.text_token_offset = self.num_speech_tokens + self.num_stop_tokens
             self.silent_tokens = [1, 2, 28, 29, 55, 248, 494, 2241, 2242, 2322, 2323]
 
-        self.max_num_silent_tokens = LLM_MAX_NUM_SILENT_TOKENS
+        self.mix_ratio = mix_ratio
+        self.max_num_silent_tokens = max_num_silent_tokens
 
-        logger.info("LLM is ready.")
+        self.zmp_ctx = zmq.asyncio.Context()
 
     async def inference_unistream(
         self,
@@ -159,7 +170,10 @@ class LLMWrapper:
             return self.inference_bistream(text_tokens, *args)
         return self.inference_unistream(text_tokens, *args)
 
-    async def run(self, input_generator: AsyncGenerator, output_queue: asyncio.Queue, prompt: Prompt, params: Params):
+    async def run(self, socket_addr: str, prompt: Prompt, params: Params):
+        socket = self.zmp_ctx.socket(zmq.PULL)
+        socket.connect(socket_addr)
+
         keep_original_prompt = params.llm_keep_orig_prompt
         min_cached_count = params.llm_min_cached_count
         min_text_cached_length = params.llm_min_text_cached_length
@@ -174,7 +188,11 @@ class LLMWrapper:
         curr_num_silent_tokens = 0
 
         try:
-            async for input_text_tokens in input_generator:
+            while True:
+                input_text_tokens = await socket.recv_pyobj()
+                if input_text_tokens is None:
+                    break
+
                 if len(cached_ptt) > 0:
                     if keep_original_prompt:
                         ptt_input = prompt.text_tokens + cached_ptt
@@ -203,7 +221,7 @@ class LLMWrapper:
                             continue
                     else:
                         curr_num_silent_tokens = 0
-                    await output_queue.put(speech_token)
+                    yield speech_token
 
                 cached_ptt_lens.append(len(cached_input))
                 cached_pst_lens.append(len(curr_generated))
@@ -221,4 +239,7 @@ class LLMWrapper:
                     cached_ptt = cached_ptt[dropped_ptt_len:]
                     cached_pst = cached_pst[dropped_pst_len:]
         finally:
-            await output_queue.put(None)
+            try:
+                socket.close()
+            except:
+                pass

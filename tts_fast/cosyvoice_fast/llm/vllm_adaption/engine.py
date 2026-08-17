@@ -7,7 +7,8 @@ import vllm
 from vllm import AsyncLLMEngine
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.sampling_params import SamplingParams
-
+from vllm.config import CompilationConfig, CUDAGraphMode
+from vllm import ModelRegistry
 
 def register_model(model_name, forced):
     vllm_path = os.path.dirname(vllm.__file__)
@@ -15,15 +16,10 @@ def register_model(model_name, forced):
     tgt_model_file = os.path.join(vllm_models_dir, f"{model_name}.py")
 
     if os.path.exists(tgt_model_file) and not forced:
-        print(
-            f"The model `{model_name}` is already registered. "
-            "Use `forced=True` to overwrite."
-        )
+        print(f"The model `{model_name}` is already registered. Use `forced=True` to overwrite.")
         return
 
-    src_model_file = os.path.join(
-        os.path.dirname(os.path.abspath(__file__)), "models", f"{model_name}.py"
-    )
+    src_model_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "models", f"{model_name}.py")
     shutil.copy(src_model_file, tgt_model_file)
 
     registry_path = os.path.join(vllm_models_dir, "registry.py")
@@ -39,10 +35,7 @@ def register_model(model_name, forced):
             break
     if remove_pos is not None:
         if not forced:
-            print(
-                f"The model `{model_name}` is already registered. "
-                "Use `forced=True` to overwrite."
-            )
+            print(f"The model `{model_name}` is already registered. Use `forced=True` to overwrite.")
             return
         else:
             lines.pop(remove_pos)
@@ -64,25 +57,19 @@ def register_model(model_name, forced):
     print(f"Successfully register model `{model_name}`!")
 
 
-def get_generation_fn(model_dir, model_name="cosyvoice2llm", force_registration=True):
+def get_generation_fn(model_dir, cache_dir, model_name="cosyvoice2llm", force_registration=True):
     model_name = model_name.lower()
     register_model(model_name, force_registration)
 
     ENGINE_ARGS["hf_overrides"] = (
-        {"architectures": ["CosyVoice2LLM"]}
-        if model_name == "cosyvoice2llm"
-        else {"architectures": ["CosyVoice3LLM"]}
+        {"architectures": ["CosyVoice2LLM"]} if model_name == "cosyvoice2llm" else {"architectures": ["CosyVoice3LLM"]}
     )
-    engine = AsyncLLMEngine.from_engine_args(
-        AsyncEngineArgs(model=model_dir, **ENGINE_ARGS)
+    ENGINE_ARGS["compilation_config"] = CompilationConfig(
+        cache_dir=os.path.join(cache_dir, "vllm"), level=3, cudagraph_mode=CUDAGraphMode.FULL_AND_PIECEWISE
     )
+    engine = AsyncLLMEngine.from_engine_args(AsyncEngineArgs(model=model_dir, **ENGINE_ARGS))
 
-    async def generation_fn(
-        input_token_ids,
-        stop_token_ids,
-        max_tokens=None,
-        min_tokens=0,
-    ):
+    async def generation_fn(input_token_ids, stop_token_ids, max_tokens=None, min_tokens=0):
         sampling_params = SamplingParams(
             **SAMPLING_PARAMS,
             stop_token_ids=stop_token_ids,
