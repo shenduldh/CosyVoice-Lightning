@@ -105,7 +105,7 @@
    pip install ttsfrd-0.4.2-cp310-cp310-linux_x86_64.whl
    ```
 
-   编辑环境参数文件 `api/.env` 中的 `TTSFRD_RESOURCE_PATH` 为 `CosyVoice-ttsfrd/resource` 的路径。
+   编辑环境参数文件 `.env` 中的 `TTSFRD_RESOURCE_PATH` 为 `CosyVoice-ttsfrd/resource` 的路径。
 
    或者安装其他版本的 ttsfrd：
 
@@ -119,12 +119,12 @@
 4. 下载模型文件
    - 从 [iic/CosyVoice2-0.5B - ModelScope](https://www.modelscope.cn/models/iic/CosyVoice2-0.5B) 或 [FunAudioLLM/Fun-CosyVoice3-0.5B-2512](https://www.modelscope.cn/models/FunAudioLLM/Fun-CosyVoice3-0.5B-2512) 下载模型文件。
 
-   - 编辑 `api/.env` 中 TTS 模型文件的路径。
+   - 编辑 `.env` 中 TTS 模型文件的路径。
 
 5. 修改 CUDA 架构版本
    - 使用 `python -c "import torch; print(torch.cuda.get_device_capability())` 查看你的 CUDA 架构版本。
 
-   - 修改 `api/.env` 和 `run_demo.sh` 中的 `TORCH_CUDA_ARCH_LIST` 为你的 CUDA 架构版本。比如上面命令的输出是 `(8, 9)`，则修改为 `TORCH_CUDA_ARCH_LIST=8.9`。
+   - 修改 `.env` 中的 `TORCH_CUDA_ARCH_LIST` 为你的 CUDA 架构版本。比如上面命令的输出是 `(8, 9)`，则修改为 `TORCH_CUDA_ARCH_LIST=8.9`。
 
 ## Usage
 
